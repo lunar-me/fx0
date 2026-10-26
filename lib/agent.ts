@@ -199,7 +199,9 @@ async function hydrateSession(host: SessionState): Promise<StoredSession | null>
 // Warm-up while the user types: the chat's state and the process's agent.
 export async function warmChat(host: SessionState): Promise<void> {
   await hydrateSession(host)
-  agent()
+  // The SDK initializes durability lazily. Generating an unbound id waits for
+  // that initialization without creating a stored session or starting a turn.
+  await agent().newSessionId()
 }
 
 // Prompts this instance has submitted; the first one also pays for loading

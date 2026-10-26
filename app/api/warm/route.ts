@@ -7,10 +7,12 @@ export const maxDuration = 60
 // the process's libfx agent happen now, so the send that follows skips them. Best
 // effort: failures stay quiet.
 export const POST = withSessionRoute(async (_request, { host }) => {
+  const started = performance.now()
   try {
     await warmChat(host)
+    log(host.id, 'warm:ready', { durationMs: Math.round(performance.now() - started) })
   } catch {
-    log(host.id, 'warm:skipped', {})
+    log(host.id, 'warm:skipped', { durationMs: Math.round(performance.now() - started) })
   }
   return new Response(null, { status: 204 })
 })

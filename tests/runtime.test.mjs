@@ -282,6 +282,49 @@ async function until(check, label) {
 const sendKind = (message) => (message.promptOptions ? 'prompt' : 'steer')
 const messageIdOf = (message) => (message.promptOptions ?? message.steerOptions).messageId
 
+test('warm-up awaits lazy SDK initialization without binding a chat or submitting a prompt', async (t) => {
+  const f = fixture(t)
+  const host = boundHost('warm-lazy-backend')
+  const constructed = Promise.withResolvers()
+  const ready = Promise.withResolvers()
+  const original = f.libfx.createFxAgent
+  let initialized = false
+  let finished = false
+  f.libfx.createFxAgent = options => {
+    const sdk = original(options)
+    constructed.resolve()
+    return { ...sdk, newSessionId: async () => { initialized = true; await ready.promise; return sdk.newSessionId() } }
+  }
+  const pending = runtime.warmChat(host).then(() => { finished = true })
+  await constructed.promise
+  try {
+    assert.equal(initialized, true, 'constructing the agent alone does not initialize its lazy backend')
+    await Promise.resolve()
+    assert.equal(finished, false, 'warm-up must not finish before SDK initialization')
+  } finally { ready.resolve() }
+  await pending
+  assert.equal(finished, true)
+  assert.equal(f.stored.libfxSessionId, null, 'the generated warm-up id is not bound to this chat')
+  assert.deepEqual(f.events, [])
+  assert.deepEqual(f.sent, [])
+  assert.deepEqual(f.calls, [])
+  assert.equal(f.credentials.size, 0)
+  assert.equal(f.executionCredentials.size, 0)
+})
+
+test('warm-up surfaces SDK initialization failure to its best-effort route without storing a message', async (t) => {
+  const f = fixture(t)
+  const host = boundHost('warm-backend-failure')
+  const failure = new Error('SDK backend unavailable')
+  const original = f.libfx.createFxAgent
+  f.libfx.createFxAgent = options => ({ ...original(options), newSessionId: async () => { throw failure } })
+  await assert.rejects(runtime.warmChat(host), error => error === failure)
+  assert.equal(f.stored.libfxSessionId, null)
+  assert.deepEqual(f.events, [])
+  assert.deepEqual(f.sent, [])
+  assert.equal(f.executionCredentials.size, 0)
+})
+
 test('trial-chat inputs each keep their admission funding and cannot steer into a different billing mode', async (t) => {
   const f = fixture(t)
   const host = boundHost('mixed-funding')

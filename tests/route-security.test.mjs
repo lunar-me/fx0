@@ -119,9 +119,9 @@ const mocks = {
       if (globalThis.securityTest.session && host.boundUser !== globalThis.securityTest.session.userId) throw new Error('Unbound gateway host');
       globalThis.securityTest.trace.push(name);
     }
-    export async function warmChat(host) { effect('warm', host); }
+    export async function warmChat(host) { effect('warm', host); await globalThis.securityTest.warmWait?.(); }
     export function assertPromptFunding() {}
-    export function log() {}
+    export function log(...entry) { globalThis.securityTest?.logs?.push(entry); }
     export async function submitPrompt(host, author, ...args) { effect('prompt', host); globalThis.securityTest.author = author; globalThis.securityTest.text = args[0]; globalThis.securityTest.funding = args[5]; return { id: 1, seq: globalThis.securityTest.submittedSeq ?? 1, trialChat: !!args[5] || !!globalThis.securityTest.generationOptions?.trialChat }; }
     export async function followChat(host) { effect('wake', host); }
     export async function renewTurnCredential(host) { effect('renew', host); }
@@ -271,6 +271,37 @@ for (const name of ['answer', 'artifact', 'artifact-frame', 'artifact-image', 'c
 const modelsRoute = await import('../app/api/models/route.ts')
 const page = await import('../app/page.tsx')
 const policy = await import('../lib/route-auth.ts')
+
+test('warm-up reports ready only after initialization and logs a bounded duration', async () => {
+  const s = reset()
+  s.logs = []
+  const gate = Promise.withResolvers()
+  s.warmWait = () => gate.promise
+  const pending = routes.warm.POST(request('warm', 'POST', own))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.ok(s.trace.includes('warm'))
+  assert.deepEqual(s.logs, [])
+  gate.resolve()
+  assert.equal((await pending).status, 204)
+  assert.equal(s.logs.length, 1)
+  const [id, event, fields] = s.logs[0]
+  assert.equal(id, own)
+  assert.equal(event, 'warm:ready')
+  assert.deepEqual(Object.keys(fields), ['durationMs'])
+  assert.ok(Number.isSafeInteger(fields.durationMs) && fields.durationMs >= 0)
+  assert.equal(s.trace.includes('prompt'), false)
+})
+
+test('failed warm-up stays best effort and never logs ready or failure contents', async () => {
+  const s = reset()
+  s.logs = []
+  s.warmWait = () => { throw new Error('private failure contents') }
+  assert.equal((await routes.warm.POST(request('warm', 'POST', own))).status, 204)
+  assert.equal(s.logs.length, 1)
+  assert.equal(s.logs[0][1], 'warm:skipped')
+  assert.deepEqual(Object.keys(s.logs[0][2]), ['durationMs'])
+  assert.doesNotMatch(JSON.stringify(s.logs), /private failure/)
+})
 
 test('a human without OAuth can send five sponsored prompts, and the sixth never reaches the agent', async () => {
   const state = reset({ session: null, trialEnabled: true })
