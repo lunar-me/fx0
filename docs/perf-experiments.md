@@ -156,6 +156,68 @@ The network spans confirm the mechanism in production: on the candidate, the vie
 
 **Finding from the same data: cold starts.** 3 of 20 prompts (both sides: baseline 3 and 5, candidate 3 and 4) had 2.1–3.0 s Sending. The extra time sat before the handler started (+0.7…1.3 s outside it) and in `prompt.bind` (+470 ms, libfx agent creation). If ~15 % of prompts pay +1.5–2 s, that dwarfs any 45 ms admission tweak. Next: confirm they are cold function instances (new trace lanes) and measure what instance startup and the first `createFxAgent` cost.
 
+## Cold starts: what a new instance's first prompt pays
+
+**Measurement added** (numbers only, tracing-enabled previews only): `request.handle` carries the process `uptime` and `first` (first traced request of the process); `registered` and `loaded` record when Next ran `instrumentation.ts` `register()` and when the prompt route module was evaluated; `agent.create` and `agent.session_id` split `prompt.bind`.
+
+**Fresh-deploy samples** (labs `cold-1` and `cold-2`; the first prompt after a deploy is guaranteed cold):
+
+| Stage | Cold (2 samples) | Warm | Extra |
+| --- | ---: | ---: | ---: |
+| Outside the handler (Next initializes, route module loads) | 629–725 ms | 200–360 ms | ~+430 ms |
+| Before `prompt.bind` (auth, journal, credential, hydrate) | 217–222 ms | 35–47 ms | ~+180 ms |
+| `agent.session_id` (libfx durable backend init; no network) | 331–351 ms | 0–1 ms | ~+340 ms |
+| `prompt.accepted` | 951–1088 ms | 394–537 ms | ~+500 ms; mostly the first Vercel Queues send (574 ms vs ~50–85 ms) |
+| **Sending** | **2170–2388 ms** | **659–885 ms** | **~+1.5 s** |
+
+**Findings.**
+
+1. Every slow outlier in Experiment 2 (`prompt.bind` > 300 ms) was the first prompt of a process.
+2. Vercel had started the cold process 20–28 s before the prompt, but Next initializes lazily: `register()` ran 157 ms before the handler. So `instrumentation.ts` cannot move this work ahead of the request; it would run inside it.
+3. Routes are bundled into functions by configuration. The `maxDuration = 800` group is `prompt`, `events`, `model`, `answer`, `cancel`, `libfx`. `/api/warm` had `maxDuration = 60`, so it ran in a different function and never warmed the prompt's instances. That is why the earlier warm-up (PR #33) showed no gain. A prompt landing on an instance that had served `/api/events` or `/api/model` had the libfx agent already created.
+4. Process mixing is visible: the second prompt in `cold-2` landed on a different instance (registered at 0.5 s) than the first.
+
+**Method lessons recorded.**
+
+- Before every measurement, verify that the branch alias serves the deployment of the exact commit: use `vercel list --meta githubCommitSha=<sha>` and `vercel inspect <alias>`. Do not use the GitHub status: a second Vercel project (`shadcn/fx0`) posts the same "Vercel – fx0" context for these branches.
+- `next build` deletes `.next`. Earlier lab runs stored there were lost (their numbers survive in this log). `perf:lab` now refuses an `--out` inside `.next`; labs live in `~/.fx0-perf-labs/`.
+
+## Experiment 3: warm the prompt's own function while the user types
+
+**Hypothesis.** If `/api/warm` shares the prompt's function, the existing typing warm-up (hydrate, create the libfx agent, plus loading libfx's durable backend) initializes the instance the prompt will use. That would remove most of the ~1.5 s a cold first prompt pays, provided the person pauses before sending.
+
+**Change** (branch `esteban/fx0-perf-warm-group`, commit `60a1c5f`):
+
+- `/api/warm` sets `maxDuration = 800`, the same as `/api/prompt`.
+- `warmChat` also awaits `agent().newSessionId()`, which loads the durable backend and returns an id without writing anything.
+- `tests/function-grouping.test.mjs` keeps both routes' `maxDuration` equal. It fails when they differ (checked by mutation).
+
+**Security review.** `/api/warm` keeps the same auth (`withSessionRoute`) and ownership check, and does the same work plus one id generation. `maxDuration` only caps run time; the route still returns in milliseconds. Nothing reaches the model and nothing is written.
+
+**Method.** Cold A/B: before each pair, both previews are redeployed and the run waits until each alias serves its new READY deployment, so both sides' prompts land on fresh instances. One prompt per side, alternating order, `--think-ms 3000` on both sides. Lab `~/.fx0-perf-labs/exp3-warm-group-cold`.
+
+**Result (cold).** 6 pairs, 12 prompts, 0 failures, same workload (`reply-ok-think3000ms`):
+
+| Metric | Baseline p50 | Candidate p50 | Paired delta p50 | Per-pair deltas |
+| --- | ---: | ---: | ---: | --- |
+| **Sending** | 2580 ms | 1559 ms | **−983 ms (−38 %)** | −1014, −621, −916, −1130, −952, −1229 (6 of 6 faster) |
+| **First text** | 3856 ms | 2931 ms | **−1056 ms** | +1520, −2306, −756, −1355, −321, −1757 (5 of 6 faster) |
+| Outside the handler | 775 ms | 426 ms | −340 ms | |
+| Before `prompt.bind` | 220 ms | 56 ms | −165 ms | |
+| `agent.session_id` (backend init) | 346 ms | 0 ms | −346 ms | |
+| `prompt.accepted` | 1119 ms | 1009 ms | −62 ms | |
+| First Queues send | 545 ms | 420 ms | −52 ms | |
+
+All 6 baseline prompts were their process's first request; all 6 candidate prompts landed on an instance the warm-up had already served. Every Sending delta exceeds the measured preview noise (~±250 ms) several times over.
+
+**Still paid on a cold candidate prompt.** The prompt route's own module loads on its first request (~+150–200 ms outside the handler), and the first Vercel Queues send costs ~420 ms against ~50–85 ms warm. These are the next targets.
+
+The report tool refused deltas (`condition_unknown`) because `run` was not told the condition. The script now passes `--condition cold`. The deltas above were computed per pair from the saved runs.
+
+**Result (warm, no redeploys).** `ab` with one warm-up per side, 4 pairs, `--think-ms 3000` (lab `~/.fx0-perf-labs/exp3-warm-group-warm`). No regression: Sending p50 1323 → 1150 ms (paired −309 ms), first text 2741 → 2363 ms (paired −268 ms). With 4 pairs this is descriptive only. More telling: even after a warm-up, 2 of 4 baseline prompts still paid libfx backend initialization (`agent.session_id` 352 and 325 ms; one was its process's first request), because Vercel spreads prompts across several instances. 0 of 4 candidate prompts did. Cold initialization is not limited to fresh deploys; it shows up in normal use.
+
+**Decision.** Ship it. The change gives `/api/warm` the prompt's `maxDuration`, loads the durable backend during the warm-up, and adds the grouping test. It is configuration plus one side-effect-free call, auth is unchanged, and it removes ~1 s from a cold first prompt when the person pauses about 3 s or more before sending. A paste-and-Enter in under a second gets only part of the benefit.
+
 ## Candidate ideas
 
 | Idea | Expected effect | Security assessment | Status |
@@ -173,6 +235,9 @@ The network spans confirm the mechanism in production: on the candidate, the vie
 | Decompose libfx admission (549 ms) with network spans | Found 6 serial calls | Measurement only | Done |
 | libfx: skip the pre-reads for a session created in the same request | Sending −100…170 ms on a chat's first message | **Rejected:** two requests can race on a new chat's binding, so "created here" does not prove the log is empty | Rejected |
 | libfx: overlap the viewer-start read with `send()` (Experiment 2) | −44 ms to first write | Same invariants, proven on the real SDK | Works; below end-to-end noise. Small libfx PR candidate |
-| Cold starts: 3 of 20 prompts at 2–3 s Sending | Up to −1.5…2 s for those prompts | Measure first | **Next** |
+| Cold starts: 3 of 20 prompts at 2–3 s Sending | Up to −1.5…2 s for those prompts | Measure first | Measured: ~+1.5 s per cold first prompt |
+| Warm the prompt's own function while typing (Experiment 3) | Sending −983 ms cold (6/6 pairs) | Auth unchanged; no writes | **Ship** |
+| Load the prompt route module during the warm-up | ~−150…200 ms on a cold prompt | Import only | Next |
+| First Vercel Queues send on an instance (~420 ms vs ~60 ms) | ~−350 ms on a cold prompt | Must not send a real message | Investigate |
 | libfx: combine the serial admission writes | Sending −50…150 ms | Only if the message record stays atomic and precedes the backstop | Investigate (libfx) |
 | fx0: drop the explicit `messageId` | Faster admission path | **Rejected:** a retried send could duplicate the message | Rejected |
