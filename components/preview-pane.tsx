@@ -7,6 +7,7 @@ import { CAPTURE_PAINT_MS, CAPTURE_PREVIEW_START_MS, type CaptureFailure } from 
 import { captureFrame, reportCaptureFailure, sendCapture, type CaptureRequest } from './design-capture'
 import { isPreviewErrorStatus, PREVIEW_PREPARE_MS, PREVIEW_PROTOCOL, type PreviewPayload } from '../lib/preview-update'
 import { AuthRouteError, fetchUi, signalAuthRequired, uiAuthError } from './auth-ui'
+import { browserTraceEnabled, presentBrowserPreview } from '../lib/trace-browser'
 import DesignLinkDialog from './design-link-dialog'
 import { HowItWorksPanel } from './how-it-works'
 
@@ -514,6 +515,29 @@ export default function PreviewPane({
   }, [liveDraft, draft, published, scope, source.revision, accessAllowed])
   // Once published, never cover the live program with a scriptless draft photo.
   const draftLayer = published ? null : liveDraft ?? (heldDraft?.scope === scope ? heldDraft.html : null)
+  // preview.presented means the latest confirmed revision is the front frame, the draft
+  // is gone, and two real frames have painted since. The child's own paint message is
+  // not enough: it arrives before this frame reaches the screen.
+  const shown = front == null ? null : slots[front]
+  const presentedKey = shown && !draftLayer && viewing == null && shown.appliedRevision === source.revision
+    ? `${front}:${shown.mountUrl}:${shown.documentId}:${source.revision}` : null
+  const reportedPresent = useRef<string | null>(null)
+  useEffect(() => {
+    if (presentedKey == null || front == null || reportedPresent.current === presentedKey || !browserTraceEnabled()) return
+    const index = front
+    let second = 0
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => {
+        if (reportedPresent.current === presentedKey || (frames.current[index]?.getBoundingClientRect().width ?? 0) < 1) return
+        reportedPresent.current = presentedKey
+        presentBrowserPreview(source.sessionId, source.revision)
+      })
+    })
+    return () => {
+      cancelAnimationFrame(first)
+      cancelAnimationFrame(second)
+    }
+  }, [presentedKey, front, source.sessionId, source.revision])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

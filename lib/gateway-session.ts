@@ -1,4 +1,7 @@
 import type { SessionData } from './secure-session'
+// @ts-expect-error Node strip-types tests require the source extension.
+import { traceServer, traceServerEvent } from './trace-server.ts'
+import type { TraceContext } from './performance-trace'
 import type { SessionState } from './session'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { AuthError } from './accounts.ts'
@@ -131,7 +134,10 @@ export interface DesignDraftObserver {
 
 // Observe on the SDK's own read path. The argument-end flush happens before
 // libfx receives those bytes, and cancelling the response cancels the observer.
-function watchDesignDrafts(body: ReadableStream<Uint8Array>, observer: DesignDraftObserver): ReadableStream<Uint8Array> {
+function watchDesignDrafts(body: ReadableStream<Uint8Array>, observer: DesignDraftObserver, context?: TraceContext): ReadableStream<Uint8Array> {
+    const endStream = traceServer('model.stream', context)
+    let count = 0
+    let bytes = 0
     const reader = body.getReader()
     const decoder = new TextDecoder()
     const designs = new Map<string, (delta: string) => void>()
@@ -169,12 +175,17 @@ function watchDesignDrafts(body: ReadableStream<Uint8Array>, observer: DesignDra
           if (designs.size) await observer.abort?.()
           reader.releaseLock()
           controller.close()
+          endStream({ count, bytes })
           return
         }
+        count++
+        bytes += value.byteLength
+        if (count === 1) traceServerEvent('model.first_chunk', context, { bytes: value.byteLength, first: true })
         buffer += decoder.decode(value, { stream: true })
         await parse()
         controller.enqueue(value)
         } catch (error) {
+          endStream({ count, bytes, failed: true })
           await observer.abort?.()
           reader.releaseLock()
           controller.error(error)
@@ -182,6 +193,7 @@ function watchDesignDrafts(body: ReadableStream<Uint8Array>, observer: DesignDra
       },
       async cancel(reason) {
         try { await reader.cancel(reason) } finally {
+          endStream({ count, bytes, cancelled: true })
           reader.releaseLock()
           await observer.abort?.()
         }
@@ -194,6 +206,7 @@ function transport(
   fetcher: typeof fetch,
   onError?: (error: GatewayError) => void,
   onDraft?: DesignDraftObserver | ((callId: string, chunk: string) => void),
+  traceContext?: TraceContext,
 ): typeof fetch {
   return async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
@@ -232,7 +245,7 @@ function transport(
     const response = await fetcher(input, { ...init, headers, cache: 'no-store', redirect: 'error' })
     if (response.ok && onDraft && response.body && url.pathname.endsWith('/language-model')) {
       const observer = typeof onDraft === 'function' ? { delta: onDraft } : onDraft
-      const body = watchDesignDrafts(response.body, observer)
+      const body = watchDesignDrafts(response.body, observer, traceContext)
       return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers })
     }
     if (response.ok) return response
@@ -266,8 +279,9 @@ export function gatewayFetch(
   host: { gatewaySession: SessionData | TrialCredential | null; rateLimitStreak?: number; lastGatewayError?: GatewayError | null },
   fetcher: typeof fetch = fetch,
   onDesignDraft?: DesignDraftObserver | ((callId: string, chunk: string) => void),
+  traceContext?: TraceContext,
 ): typeof fetch {
-  const send = transport(() => host.gatewaySession, fetcher, (error) => { host.lastGatewayError = error }, onDesignDraft)
+  const send = transport(() => host.gatewaySession, fetcher, (error) => { host.lastGatewayError = error }, onDesignDraft, traceContext)
   return async (input, init) => {
     const response = await send(input, init)
     if (response.status !== 429) {

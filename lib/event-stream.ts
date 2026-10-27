@@ -1,6 +1,8 @@
 import type { StreamItem } from './events'
 import { localEvents, readEvents } from './journal'
 import { readDraft, type DraftCursor } from './draft-store'
+// @ts-expect-error Node strip-types tests require the source extension.
+import { serverTraceContext, traceAsync, traceServer } from './trace-server.ts'
 
 interface EventStreamOptions {
   afterSeq?: number
@@ -54,18 +56,29 @@ export function createSessionEventStream(sessionId: string, options: EventStream
       // Delivery is in seq order and exactly once: the cursor only advances, and any
       // item at or below it, from either source, has already been sent.
       const deliver = (item: StreamItem): boolean => {
-        if (typeof item.seq === 'number') {
-          if (item.seq <= cursor) return false
-          cursor = item.seq
+        const endDeliver = traceServer('sse.deliver', serverTraceContext(sessionId, item.turnId), {
+          count: 1, ...(typeof item.seq === 'number' ? { seq: item.seq, duplicate: item.seq <= cursor } : {}),
+        })
+        let failed = false
+        try {
+          if (typeof item.seq === 'number') {
+            if (item.seq <= cursor) return false
+            cursor = item.seq
+          }
+          if (item.type === 'turn_start') running = true
+          if (item.type === 'done' || item.type === 'error') running = false
+          send(`id: ${item.seq ?? ''}\ndata: ${JSON.stringify(item)}\n\n`)
+          if (options.closeWhen?.(item)) {
+            close()
+            return true
+          }
+          return false
+        } catch (error) {
+          failed = true
+          throw error
+        } finally {
+          endDeliver({ failed })
         }
-        if (item.type === 'turn_start') running = true
-        if (item.type === 'done' || item.type === 'error') running = false
-        send(`id: ${item.seq ?? ''}\ndata: ${JSON.stringify(item)}\n\n`)
-        if (options.closeWhen?.(item)) {
-          close()
-          return true
-        }
-        return false
       }
       // A failed journal read ends the stream with an error line, unless the stream
       // already ended while the read was pending: the client left, or a terminal
@@ -89,7 +102,8 @@ export function createSessionEventStream(sessionId: string, options: EventStream
         if (pollTimer) clearTimeout(pollTimer)
         pollTimer = null
         try {
-          const [items, draft] = await Promise.all([readEvents(sessionId, cursor), readDraft(sessionId, draftCursor).catch(() => null)])
+          const [items, draft] = await traceAsync('sse.poll', serverTraceContext(sessionId),
+            () => Promise.all([readEvents(sessionId, cursor), readDraft(sessionId, draftCursor).catch(() => null)] as const), { seq: cursor })
           for (const item of items) {
             if (stopped || deliver(item)) return
           }

@@ -18,6 +18,7 @@ import { readExecutionFunding } from './turn-credential'
 import { effectiveEffort, effectiveFast, effectiveModel, INSTANCE, log, type SessionState } from './session'
 import type { StreamItem } from './events'
 import { TRIAL_MODEL } from './trial-policy'
+import { serverTraceContext, traceAsync } from './trace-server'
 
 // The projector copies a chat's libfx stream into fx0's transcript, the
 // StreamItem protocol the page already renders. Any route following a chat runs
@@ -222,7 +223,8 @@ export async function addPreviewWaits(sessionId: string, entries: Entry[]): Prom
 // moved the cursor first (that one carries on).
 export async function project(agent: FxAgent, host: SessionState, libfxSessionId: string, options: FollowOptions): Promise<void> {
   // History an earlier follower could not finish, before following on.
-  await finishTurns(host)
+  const context = serverTraceContext(host.id)
+  await traceAsync('projector.history', context, () => finishTurns(host))
   let cursor = await projectedCursor(host.id)
   const reader = agent.session(libfxSessionId).stream(cursor).getReader()
   const decoder = new TextDecoder()
@@ -246,28 +248,30 @@ export async function project(agent: FxAgent, host: SessionState, libfxSessionId
     const batch = pending
     pending = []
     if (!batch.length) return true
-    const toCursor = batch[batch.length - 1].line.cursor ?? cursor
-    const entries = mergeDeltas(batch.flatMap((part) => part.entries))
-    const starts: Record<number, TurnStart> = {}
-    for (const { line } of batch) {
-      const id = line.type === 'turn_start' ? messageIdOf(line) : null
-      if (id != null && line.type === 'turn_start') starts[id] = await readTurnStart(host, id, line.input)
-    }
-    await addPreviewWaits(host.id, entries)
-    const items = await projectEvents(host.id, cursor, toCursor, entries, starts)
-    if (!items) return false
-    cursor = toCursor
-    let ended = false
-    for (const item of items) {
-      if (item.type === 'turn_start') running = true
-      else if (item.type === 'done' || item.type === 'error') {
-        running = false
-        ended = true
+    return traceAsync('projector.batch', context, async () => {
+      const toCursor = batch[batch.length - 1].line.cursor ?? cursor
+      const entries = mergeDeltas(batch.flatMap((part) => part.entries))
+      const starts: Record<number, TurnStart> = {}
+      for (const { line } of batch) {
+        const id = line.type === 'turn_start' ? messageIdOf(line) : null
+        if (id != null && line.type === 'turn_start') starts[id] = await readTurnStart(host, id, line.input)
       }
-    }
-    if (ended) await finishTurns(host)
-    armIdle()
-    return true
+      await addPreviewWaits(host.id, entries)
+      const items = await traceAsync('journal.commit', context, () => projectEvents(host.id, cursor, toCursor, entries, starts), { count: entries.length })
+      if (!items) return false
+      cursor = toCursor
+      let ended = false
+      for (const item of items) {
+        if (item.type === 'turn_start') running = true
+        else if (item.type === 'done' || item.type === 'error') {
+          running = false
+          ended = true
+        }
+      }
+      if (ended) await traceAsync('projector.history', context, () => finishTurns(host))
+      armIdle()
+      return true
+    }, { count: batch.length })
   }
 
   let flushTimer: ReturnType<typeof setTimeout> | null = null

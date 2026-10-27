@@ -180,6 +180,8 @@ npm run test:turns:integration    # needs local redis-server/redis-cli; no remot
 
 The auth and route tests mock Vercel, AI Gateway and both databases, so check a real sign-in and real billing on a deployment.
 
+For local timing captures, run `FX0_TRACE=1 npm run dev`. See [local performance traces](docs/performance.md) for browser export, server reports, and deterministic tracing tests.
+
 ## Safety
 
 Generated pages run in a sandboxed iframe on an opaque origin. They can't read the app's cookies, storage or credentials, and their Content Security Policy blocks network requests (`connect-src 'none'`). It's still the browser enforcing all of this, though, not a sealed VM.

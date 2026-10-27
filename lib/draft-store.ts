@@ -5,6 +5,8 @@ import { Redis } from '@upstash/redis'
 import { createDraftBatch } from './design-draft.ts'
 import type { DesignDraftObserver } from './gateway-session'
 import type { StreamItem } from './events'
+// @ts-expect-error Node strip-types tests require the source extension.
+import { serverTraceContext, traceAsync } from './trace-server.ts'
 
 const TTL_MS = 30 * 60_000
 const MAX_BYTES = 512 * 1024
@@ -76,24 +78,28 @@ return cjson.encode({id=id, closed=closed, published=redis.call('HGET', KEYS[3],
 export interface DraftCursor { id: string; count: number; closed: boolean; revision: number; turnId: number; base: number }
 
 export async function reserveDraft(chatId: string, requestId: string, turnId: number): Promise<number | null> {
-  const base = await redis().eval(RESERVE, keys(chatId), [requestId, turnId])
+  const base = await traceAsync('draft.write', serverTraceContext(chatId, turnId),
+    () => redis().eval(RESERVE, keys(chatId), [requestId, turnId]))
   return base === false || base === null ? null : Number(base)
 }
 
 export async function beginDraft(chatId: string, id: string, callId: string, turnId: number, base: number, requestId: string): Promise<number> {
-  return Number(await redis().eval(BEGIN, keys(chatId), [id, turnId, base, callId, TTL_MS, requestId]))
+  return Number(await traceAsync('draft.write', serverTraceContext(chatId, turnId),
+    () => redis().eval(BEGIN, keys(chatId), [id, turnId, base, callId, TTL_MS, requestId]), { revision: base }))
 }
 
 export async function appendDraft(chatId: string, id: string, offset: number, delta: string): Promise<boolean> {
-  return Number(await redis().eval(APPEND, keys(chatId), [id, JSON.stringify({ offset, delta }), Buffer.byteLength(delta), MAX_BYTES, TTL_MS])) === 1
+  const bytes = Buffer.byteLength(delta)
+  return Number(await traceAsync('draft.write', serverTraceContext(chatId),
+    () => redis().eval(APPEND, keys(chatId), [id, JSON.stringify({ offset, delta }), bytes, MAX_BYTES, TTL_MS]), { bytes, chars: delta.length })) === 1
 }
 
 export async function closeDraft(chatId: string, id: string): Promise<void> {
-  await redis().eval(CLOSE, keys(chatId), [id])
+  await traceAsync('draft.write', serverTraceContext(chatId), () => redis().eval(CLOSE, keys(chatId), [id]))
 }
 
 export async function closeDraftCall(chatId: string, callId: string): Promise<void> {
-  await redis().eval(CLOSE_CALL, keys(chatId), [callId])
+  await traceAsync('draft.write', serverTraceContext(chatId), () => redis().eval(CLOSE_CALL, keys(chatId), [callId]))
 }
 
 export async function readDraft(chatId: string, cursor?: DraftCursor): Promise<{ item: StreamItem; cursor: DraftCursor } | null> {

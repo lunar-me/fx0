@@ -1,5 +1,7 @@
 import { NextRequest } from 'next/server.js'
 // @ts-expect-error Node strip-types tests require the source extension.
+import { runRequestTrace, traceAsync, traceServer } from './trace-server.ts'
+// @ts-expect-error Node strip-types tests require the source extension.
 import { needsTokenRefresh, refreshAccessToken, sessionWithRefresh } from './auth.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { forwardSessionCookie, grantCookieName, GRANT_COOKIE_PREFIX, isLoginId, SESSION_COOKIE_NAME } from './auth-protocol.ts'
@@ -13,7 +15,8 @@ type SessionHandler = (request: Request, session: Partial<SessionData>) => Respo
 // Renewal belongs to the API request that consumes the credential. Pages only
 // read identity, and login/logout own selector changes.
 export function withRequestSession(body: SessionHandler) {
-  return async (request: Request): Promise<Response> => {
+  return (request: Request): Promise<Response> => runRequestTrace(request, async () => {
+    const endAuth = traceServer('request.auth')
     const cookies: SessionCookie[] = []
     let response: Response
     try {
@@ -29,7 +32,7 @@ export function withRequestSession(body: SessionHandler) {
       const grant = await getGrantFromRequest(incoming)
       // A signed-out login's grant is no session, even replayed from a copy: the
       // request runs signed out, its grant cookie is cleared, and it never refreshes.
-      const revoked = isAuthenticatedSession(grant) && await loginRevoked(grant.loginId)
+      const revoked = isAuthenticatedSession(grant) && await traceAsync('request.revocation', undefined, () => loginRevoked(grant.loginId))
       if (revoked) cookies.push(await sealSessionCookie(null, grant.loginId))
       let sealed: SessionCookie | undefined
       let expiresAt = grant.expiresAt ?? 0
@@ -62,10 +65,15 @@ export function withRequestSession(body: SessionHandler) {
           })
           forwarded = sessionRequest
         }
-        response = await body(forwarded, await getSessionFromRequest(sessionRequest))
+        const session = await getSessionFromRequest(sessionRequest)
+        endAuth()
+        response = await body(forwarded, session)
       }
     } catch {
+      endAuth({ failed: true })
       response = Response.json({ error: 'Request failed' }, { status: 503, headers: { 'cache-control': 'private, no-store' } })
+    } finally {
+      endAuth()
     }
 
     // Keep rotation on errors and streams too. Rewrap headers without reading or
@@ -73,5 +81,5 @@ export function withRequestSession(body: SessionHandler) {
     const headers = new Headers(response.headers)
     for (const cookie of cookies) headers.append('set-cookie', cookie.setCookie)
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
-  }
+  })
 }

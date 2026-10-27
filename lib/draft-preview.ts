@@ -1,3 +1,10 @@
+import type { traceBrowser } from './trace-browser'
+import type { TraceContext } from './performance-trace'
+
+// Keep this utility usable on its own (including the standalone browser probes).
+// The live preview supplies the browser recorder at the call boundary.
+const noTrace: typeof traceBrowser = () => () => {}
+
 const DRAFT_CSP = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; base-uri 'none'; form-action 'none'"
 export const EMPTY_DRAFT_DOCUMENT = `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${DRAFT_CSP}"><meta name="color-scheme" content="light dark"></head><body></body></html>`
 
@@ -47,7 +54,16 @@ function clean(element: Element) {
 }
 
 /** Model markup cannot execute scripts or fetch resources while being cleaned. */
-export function draftDocument(html: string): string {
+export function draftDocument(html: string, context?: TraceContext, trace: typeof traceBrowser = noTrace): string {
+  const end = trace('draft.sanitize', context, { chars: html.length })
+  try {
+    return sanitizeDraft(html)
+  } finally {
+    end()
+  }
+}
+
+function sanitizeDraft(html: string): string {
   const template = document.createElement('template')
   template.innerHTML = html
   for (const node of template.content.querySelectorAll('meta,base,script,noscript,iframe,frame,object,embed,form,animate,set,animateMotion,animateTransform')) node.remove()
@@ -109,7 +125,13 @@ function patchNode(target: Node, source: Node) {
 
 // Only sanitized, scriptless markup enters the existing sandboxed document.
 // Unchanged elements, styles, scroll position and the browsing context survive.
-export function patchDraftDocument(target: Document, html: string): void {
-  const source = new DOMParser().parseFromString(draftDocument(html), 'text/html')
-  patchNode(target.documentElement, source.documentElement)
+export function patchDraftDocument(target: Document, html: string, context?: TraceContext, trace: typeof traceBrowser = noTrace): void {
+  const sanitized = draftDocument(html, context, trace)
+  const end = trace('draft.patch', context, { chars: html.length })
+  try {
+    const source = new DOMParser().parseFromString(sanitized, 'text/html')
+    patchNode(target.documentElement, source.documentElement)
+  } finally {
+    end()
+  }
 }

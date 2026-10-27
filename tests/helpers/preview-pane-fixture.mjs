@@ -90,6 +90,12 @@ window.unmountFixture = () => root.unmount()
     // Next's packaged webpack references a terser entry absent in this install.
     // Production React is still selected; minification is not under test here.
     mode: 'production', optimization: { minimize: false }, target: 'web', entry: join(output, 'pane-entry.js'),
+    // Match a normal tracing-off Next build; this standalone webpack fixture
+    // does not otherwise inline Next's public environment variables.
+    plugins: [new bundledWebpack.webpack.DefinePlugin({
+      'process.env.NEXT_PUBLIC_FX0_TRACE': JSON.stringify('0'),
+      'process.env.NEXT_PUBLIC_FX0_TRACE_SCOPE': JSON.stringify('off'),
+    })],
     output: { path: join(output, 'browser'), filename: 'bundle.js' },
     module: { rules: [{ test: /\.js$/, resolve: { fullySpecified: false } }] },
     resolve: { modules: [join(root, 'node_modules')], extensions: ['.js'], extensionAlias: { '.ts': ['.js'] } },

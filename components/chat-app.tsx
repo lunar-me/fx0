@@ -2,6 +2,7 @@
 
 import { applyDesignDraft, EMPTY_DRAFT, type DraftState } from '../lib/design-draft'
 import { createEventDelivery } from '../lib/event-delivery'
+import { acknowledgeBrowserPrompt, beginBrowserPrompt, browserTraceContext, browserTraceEnabled, correlateBrowserEvent, failBrowserPrompt, observeBrowserPromptEvent, traceBrowser, traceBrowserEvent } from '../lib/trace-browser'
 
 import {
   Suspense,
@@ -679,6 +680,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
   const applyEvent = useCallback(
     (sourceSessionId: string, item: StreamItem) => {
       if (!privateAccess.current || sourceSessionId !== activeSession.current) return
+      observeBrowserPromptEvent(sourceSessionId, item)
 
       // Provisional bytes have their own generation and UTF-16 offset. Replayed
       // prefixes overlap safely; they never concatenate a second copy of the HTML.
@@ -776,7 +778,21 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
   const ingest = useCallback((sourceSessionId: string, item: StreamItem, afterSeq?: number) => {
     // Reject another chat before mutating either the queue or its cursor.
     if (!privateAccess.current || sourceSessionId !== activeSession.current) return
-    for (const ready of eventDelivery.push(item, afterSeq)) applyEvent(sourceSessionId, ready)
+    const context = correlateBrowserEvent(sourceSessionId, item)
+    const end = traceBrowser('event.apply', context, {
+      ...(item.seq == null ? {} : { seq: item.seq }),
+      duplicate: item.seq != null && item.seq <= eventDelivery.cursor,
+    })
+    let count = 0
+    try {
+      for (const ready of eventDelivery.push(item, afterSeq)) {
+        correlateBrowserEvent(sourceSessionId, ready)
+        applyEvent(sourceSessionId, ready)
+        count++
+      }
+    } finally {
+      end({ count })
+    }
   }, [applyEvent, eventDelivery])
 
   // The background stream sleeps when the chat is idle: open while the tab is visible
@@ -803,16 +819,31 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
           headers: { accept: 'text/event-stream' },
         })
         if (!response.ok) throw new Error(`Chat stream failed with ${response.status}`)
-        await readEventStream(response, (data) => {
-          try {
-            const item = JSON.parse(data) as StreamItem
-            lastActivity = Date.now()
-            ingest(sessionId, item, after)
-            if (item.seq != null) after = Math.max(after, item.seq)
-          } catch (error) {
-            console.error('[fx0] invalid chat event', { sessionId, error })
-          }
-        })
+        let received = 0
+        const endConsumption = traceBrowser('sse.receive', browserTraceContext(sessionId), { fromPost: false })
+        let failed = false
+        try {
+          await readEventStream(response, (data) => {
+            try {
+              const item = JSON.parse(data) as StreamItem
+              const context = correlateBrowserEvent(sessionId, item)
+              traceBrowserEvent('sse.receive', context, {
+                count: ++received, first: received === 1, fromPost: false, chars: data.length,
+                ...(item.seq == null ? {} : { seq: item.seq }),
+              })
+              lastActivity = Date.now()
+              ingest(sessionId, item, after)
+              if (item.seq != null) after = Math.max(after, item.seq)
+            } catch (error) {
+              console.error('[fx0] invalid chat event', { sessionId, error })
+            }
+          })
+        } catch (error) {
+          failed = true
+          throw error
+        } finally {
+          endConsumption({ count: received, failed, cancelled: stream.signal.aborted })
+        }
       } catch (error) {
         if (stream.signal.aborted || error instanceof AuthRouteError) return
         console.error('[fx0] chat stream disconnected', { sessionId, error })
@@ -1253,6 +1284,8 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     focusPrompt()
     const name = user.name
     const clientId = newClientId()
+    // Start before reservation/thumbnail work; stream closure is not completion.
+    const traceId = beginBrowserPrompt(targetSession === 'draft' ? undefined : targetSession, clientId)
     const turnWasActive = activeTurnId != null
     // Only a draft's first prompt can start the chat with a DESIGN.md.
     const designPick = targetSession === 'draft' ? composerRef.current?.getDesignMd() ?? null : null
@@ -1289,7 +1322,10 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
       firstGeneration ??= composerRef.current?.getGeneration() ?? initialGeneration
       const pending = draftReservation.current
       draftReservation.current = null
-      reservedId = pending ? await pending : null
+      try { reservedId = pending ? await pending : null } catch (error) {
+        failBrowserPrompt(traceId)
+        throw error
+      }
     }
     console.info('[fx0] prompt submit', {
       sessionId: targetSession,
@@ -1299,6 +1335,12 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
       activeTurnId,
     })
 
+    const promptContext = { traceId, sessionId: creating ? reservedId ?? undefined : targetSession }
+    let endSend: ReturnType<typeof traceBrowser> = () => {}
+    let endConsumption: ReturnType<typeof traceBrowser> = () => {}
+    let headersPending = true
+    let sendFailed = false
+    let received = 0
     let lastEventAt = Date.now()
     let sawTurnStart = false
     let promptAdmitted = false
@@ -1334,9 +1376,10 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
       const thumbnails = await Promise.all(images.map((image) => image.thumbnail ?? imageThumbnail(image.preview)))
       const previews = thumbnails.every(Boolean) ? thumbnails as string[] : []
       const promptSession = !creating ? targetSession : reservedId ?? 'new'
+      endSend = traceBrowser('prompt.send', promptContext)
       const response = await fetchUi(`/api/prompt?session=${encodeURIComponent(promptSession)}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...(traceId ? { 'x-fx0-trace': traceId } : {}) },
         body: JSON.stringify({
           author: name,
           text: value,
@@ -1354,6 +1397,12 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
               : { name: designPick.name, text: designPick.text },
         }),
       })
+      endSend({ status: response.status, failed: !response.ok })
+      if (response.ok) acknowledgeBrowserPrompt(traceId)
+      else failBrowserPrompt(traceId)
+      headersPending = false
+      traceBrowserEvent('prompt.headers', promptContext, { status: response.status, failed: !response.ok })
+      endConsumption = traceBrowser('sse.receive', promptContext, { fromPost: true })
       if (signedOut.current) return
       if (firstGeneration) {
         preparingPromptRef.current = false
@@ -1418,6 +1467,11 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
       let responseSeq = afterSeq
       await readEventStream(response, (data) => {
         const parsed = JSON.parse(data) as StreamItem
+        const context = correlateBrowserEvent(targetSession, parsed, traceId)
+        traceBrowserEvent('sse.receive', context, {
+          count: ++received, first: received === 1, fromPost: true, chars: data.length,
+          ...(parsed.seq == null ? {} : { seq: parsed.seq }),
+        })
         // Heartbeats prove the function is alive; they must not reset the
         // watchdog — a turn can hang on the model while heartbeats flow.
         if (parsed.type !== 'heartbeat') lastEventAt = Date.now()
@@ -1436,6 +1490,8 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
         if (parsed.seq != null) responseSeq = Math.max(responseSeq, parsed.seq)
       })
     } catch (error) {
+      sendFailed = true
+      if (!promptAdmitted) failBrowserPrompt(traceId)
       if (signedOut.current) return
       if (error instanceof AuthRouteError) {
         composerRef.current?.restoreDraft({ text: value, images })
@@ -1453,6 +1509,8 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
         setInteractionNotice({ tone: 'status', text: 'Message accepted. Reconnecting to its updates…' })
       }
     } finally {
+      if (headersPending) endSend({ failed: true })
+      endConsumption({ count: received, failed: sendFailed, cancelled: signedOut.current })
       // The prompt created the chat's state by now, so the composer can load and
       // write settings without racing the first turn for the worker lock.
       if (firstGeneration) {
@@ -1709,6 +1767,14 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     if (!activityText) setActivityStarts((starts) => endActivity(starts, sessionId))
   }, [activityText, sessionId])
   const activityStartedAt = activityStarts.get(sessionId) ?? turnStartedAt
+  const traceRoot = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!browserTraceEnabled() || !traceRoot.current) return
+    // Derived diagnostic state, not a second admission gate. Set after hydration
+    // so the live driver never mistakes an editable signed-out draft for readiness.
+    traceRoot.current.dataset.fx0PromptState = booting || preparingPrompt || switchingTo ? 'loading'
+      : !hasIdentity || authBlocked || (user?.guest && freePrompts === 0) ? 'auth' : 'ready'
+  }, [booting, preparingPrompt, switchingTo, hasIdentity, authBlocked, user?.guest, freePrompts])
   const visibleErrorNotice =
     interactionNotice?.tone === 'error' ? interactionNotice : null
 
@@ -1764,7 +1830,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
   )
 
   return (
-    <div className="flex h-dvh overflow-hidden bg-background text-foreground">
+    <div ref={traceRoot} className="flex h-dvh overflow-hidden bg-background text-foreground">
       <Suspense fallback={null}><BootLoader boot={account} onBoot={adoptAccount} /></Suspense>
       <Suspense fallback={null}><BootLoader boot={sidebar} onBoot={adoptSidebar} /></Suspense>
       <Suspense fallback={null}>

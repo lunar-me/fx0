@@ -8,6 +8,8 @@ import { assertSameOrigin } from './auth-protocol.ts'
 import { withRequestSession } from './request-session.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { isAuthenticatedSession } from './secure-session.ts'
+// @ts-expect-error Node strip-types tests require the source extension.
+import { traceAsync } from './trace-server.ts'
 import { getSession, registry } from './session'
 import { bindGatewaySession } from './gateway-session'
 import { readSessionSummaries, sessionExists } from './journal'
@@ -96,7 +98,9 @@ async function ownedSession(request: Request, context: ChatRouteContext, submitt
   // for that user; deletion drops the runtime and logout unbinds it. So a runtime
   // already bound to this user skips the Neon round trip. Anyone else, or a cold
   // runtime, still gets the authoritative query.
-  if (registry().get(id)?.gatewaySession?.userId !== context.user.id) await assertSessionOwner(context.user.id, id)
+  if (registry().get(id)?.gatewaySession?.userId !== context.user.id) {
+    await traceAsync('request.owner', undefined, () => assertSessionOwner(context.user.id, id))
+  }
   const host = getSession(id)
   if (!('kind' in context.session)) bindGatewaySession(host, context.session, { submitter })
   return { ...context, id, host, created: false }
@@ -117,7 +121,8 @@ export function withPromptRoute(body: (request: Request, context: PromptRouteCon
     }
     const team = 'kind' in context.session ? null : await resolveGrantedTeam(context.session)
     return body(request, { ...context, existing: null, activate: async () => {
-      const id = team ? await reserveNewSession(context.user, team.teamId) : await reserveNewGuestSession(context.user)
+      const id = await traceAsync('prompt.activate', undefined, () =>
+        team ? reserveNewSession(context.user, team.teamId) : reserveNewGuestSession(context.user))
       const host = getSession(id)
       if (!('kind' in context.session)) bindGatewaySession(host, context.session, { submitter: true })
       return { ...context, id, host, created: true }

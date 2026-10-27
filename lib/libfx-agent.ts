@@ -12,6 +12,7 @@ import { bindLibfxSession, chatOfLibfxSession, getActiveTurn } from './journal'
 import { createDraftContext } from './draft-context'
 import { closeDraftCall, storedDraftObserver } from './draft-store'
 import { turnBudget } from './turn-budget'
+import { serverTraceContext, traceAsync, traceServer } from './trace-server'
 import {
   DEFAULT_MODEL,
   MAX_TURN_MODEL_STEPS,
@@ -109,6 +110,7 @@ function chatFetch(
     const url = new URL(input instanceof Request ? input.url : String(input))
     const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
     const modelRequest = method === 'POST' && url.pathname.endsWith('/language-model')
+    const context = id ? serverTraceContext(id, turn) : undefined
     const body = modelRequest ? requestJson(init?.body) : null
     const limited = () => {
       log(id ?? 'unknown', 'turn:step-limit', { steps: MAX_TURN_MODEL_STEPS, sender: sender === 'parent' ? 'parent' : 'subagent' })
@@ -123,11 +125,12 @@ function chatFetch(
       chatGateways.set(id, gateway)
       // All three use the same executing turn; reserving its preview and its step adds
       // no serial round trip to the funding lookup before the model request starts.
-      const [funding, draft, steps] = await Promise.all([
+      const prepare = () => Promise.all([
         readExecutionFunding(id, turn),
         turn && modelRequest ? storedDraftObserver(id, turn).catch(() => undefined) : undefined,
         turn && modelRequest ? turnBudget().reserve(id, turn, modelStepName(sender, body)) : 0,
-      ])
+      ] as const)
+      const [funding, draft, steps] = await (modelRequest ? traceAsync('model.prepare', context, prepare) : prepare())
       if (steps > MAX_TURN_MODEL_STEPS) return limited()
       // The request fails below with "sign in again"; the log says why, with
       // the turn and reason only, never a credential.
@@ -136,13 +139,21 @@ function chatFetch(
       gateway.gatewaySession = !credential ? null : 'kind' in credential ? credential : { ...credential, email: '', loginAt: 0, isLoggedIn: true }
       observer = modelRequest && watchDraft ? watchDraft(draft) : draft
     }
+    const endHeaders = modelRequest ? traceServer('model.headers', context) : undefined
+    let response: Response | undefined
     try {
-      return await gatewayFetch(gateway, fetch, observer)(input, init)
+      response = await gatewayFetch(gateway, fetch, observer, context)(input, init)
+      return response
     } catch (error) {
       // No stored credential, or one too close to expiry to start a request.
-      if (error instanceof AuthError) return gateway.gatewaySession && 'kind' in gateway.gatewaySession
-        ? jsonError(error.status, error.message) : jsonError(401, SIGN_IN_AGAIN)
+      if (error instanceof AuthError) {
+        response = gateway.gatewaySession && 'kind' in gateway.gatewaySession
+          ? jsonError(error.status, error.message) : jsonError(401, SIGN_IN_AGAIN)
+        return response
+      }
       throw error
+    } finally {
+      endHeaders?.({ status: response?.status ?? 0, failed: !response?.ok, cancelled: (init?.signal ?? (input instanceof Request ? input.signal : undefined))?.aborted ?? false })
     }
   }
 }
@@ -183,12 +194,14 @@ function chatTools(runtime: ChatRuntime, allowSubagent: boolean): FxAgentHostToo
     writes: WRITES.has(definition.name),
     async execute(input: unknown, ctx: FxToolContext) {
       const { chatId, turnId } = turnContext(ctx)
-      const host = await runtime.toolHost(chatId, turnId, ctx.signal)
-      const tool = createTools(host, { allowSubagent }).find((candidate) => candidate.name === definition.name)
-      if (!tool) throw new Error(`unknown tool ${definition.name}`)
-      try { return await tool.execute(input, ctx) } finally {
-        if (definition.name === 'publish_design') await closeDraftCall(chatId, ctx.executionId).catch(() => {})
-      }
+      return traceAsync('tool.execute', serverTraceContext(chatId, turnId), async () => {
+        const host = await runtime.toolHost(chatId, turnId, ctx.signal)
+        const tool = createTools(host, { allowSubagent }).find((candidate) => candidate.name === definition.name)
+        if (!tool) throw new Error(`unknown tool ${definition.name}`)
+        try { return await tool.execute(input, ctx) } finally {
+          if (definition.name === 'publish_design') await closeDraftCall(chatId, ctx.executionId).catch(() => {})
+        }
+      })
     },
   }))
 }
@@ -284,9 +297,11 @@ export async function runSubagent(
       ...createTools(await runtime.toolHost(chatId, turnId, signal), { allowSubagent: false }).map(tool => ({
         ...tool,
         async execute(input: unknown, ctx: FxToolContext) {
-          try { return await tool.execute(input, ctx) } finally {
-            if (tool.name === 'publish_design') await closeDraftCall(chatId, ctx.executionId).catch(() => {})
-          }
+          return traceAsync('tool.execute', serverTraceContext(chatId, turnId), async () => {
+            try { return await tool.execute(input, ctx) } finally {
+              if (tool.name === 'publish_design') await closeDraftCall(chatId, ctx.executionId).catch(() => {})
+            }
+          })
         },
       })),
       { name: 'web_search', providerExecuted: true },

@@ -1,4 +1,6 @@
 import type { FxAgent, FxSession } from 'libfx'
+// @ts-expect-error Node strip-types tests require the source extension.
+import { bindPromptTrace, serverTraceContext, traceAsync } from './trace-server.ts'
 import { createTools, type AskQuestion, type ToolHost } from './tools'
 import { assertGenerationCredential } from './gateway-session'
 import { remoteImagesEnabled } from './design-artifact'
@@ -253,7 +255,10 @@ export async function submitPrompt(
   const sender = credential && { ...credential }
   assertPromptFunding(host, funding, submitter)
   const stages = promptStages()
-  const submitted = await journalPrompt(host.id, { author, text, clientId, images, previews }, initial, !!funding)
+  const submitted = await traceAsync('prompt.journal', serverTraceContext(host.id),
+    () => journalPrompt(host.id, { author, text, clientId, images, previews }, initial, !!funding))
+  bindPromptTrace(host.id, submitted.id)
+  const traceContext = serverTraceContext(host.id, submitted.id)
   stages.mark('journal')
   log(host.id, 'prompt:submitted', { id: submitted.id, clientId, imageCount: images?.length ?? 0, idle: submitted.idle })
   const id = submitted.id
@@ -261,12 +266,15 @@ export async function submitPrompt(
   try {
     // Pinned before libfx sees the message: whether it starts a turn or joins
     // the running one, no turn can run without its funding record.
-    if (funding) await saveTrialCredential(host.id, funding, id)
-    else await saveTurnCredential(host.id, sender!, id)
+    await traceAsync('prompt.credential', traceContext, async () => {
+      if (funding) await saveTrialCredential(host.id, funding, id)
+      else await saveTurnCredential(host.id, sender!, id)
+    })
     stages.mark('credential')
-    const stored = await hydrateSession(host)
+    const stored = await traceAsync('prompt.hydrate', traceContext, () => hydrateSession(host))
     stages.mark('hydrate')
-    const { session } = await chatSession(agent(), host, stored?.libfxSessionId ?? null, agentInstructions(host), id, !!funding)
+    const { session } = await traceAsync('prompt.bind', traceContext,
+      () => chatSession(agent(), host, stored?.libfxSessionId ?? null, agentInstructions(host), id, !!funding))
     stages.mark('bind')
     // Each attached image, in order, as the design can name it.
     const placeable = assets?.handles.length
@@ -280,19 +288,21 @@ export async function submitPrompt(
     // steers it. Images need their own turn: the installed SDK can reapply an
     // image steer as an interruption of the same turn during durable admission.
     const prompted = !!(images?.length || submitted.idle || submitted.trialChat)
-    if (prompted) {
-      const turn = session.prompt(input, { messageId: `m${id}` })
-      void turn.result.catch(() => {})
-      await turn.accepted
-    } else {
-      await session.steer(input, { messageId: `m${id}` })
-    }
+    await traceAsync('prompt.accepted', traceContext, async () => {
+      if (prompted) {
+        const turn = session.prompt(input, { messageId: `m${id}` })
+        void turn.result.catch(() => {})
+        await turn.accepted
+      } else {
+        await session.steer(input, { messageId: `m${id}` })
+      }
+    })
     stages.mark('accepted')
     // The images uploaded while libfx admitted the prompt; a design can name them only
     // once they are stored, which comes long before the model publishes one.
     if (assets) {
       accepted = session
-      await assets.stored
+      await traceAsync('prompt.assets', traceContext, () => assets.stored)
       stages.mark('assets')
     }
     log(host.id, 'prompt:stages', { id, path: prompted ? 'prompt' : 'steer', ...stages.done() })
