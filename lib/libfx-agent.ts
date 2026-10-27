@@ -219,6 +219,7 @@ export function durableAgent(runtime: ChatRuntime, instructions: string): FxAgen
   const g = globalThis as unknown as { __fx0LibfxAgent?: FxAgent }
   if (g.__fx0LibfxAgent) return g.__fx0LibfxAgent
   const drafts = createDraftContext()
+  const endCreate = traceServer('agent.create')
   g.__fx0LibfxAgent = createFxAgent({
     // No durability option: libfx picks its default, Vercel's World and Queues
     // on Vercel and local files elsewhere. On Vercel a prompt runs its turn in
@@ -239,6 +240,7 @@ export function durableAgent(runtime: ChatRuntime, instructions: string): FxAgen
     instructions,
     tools: [...chatTools(runtime, true), { name: 'web_search', providerExecuted: true }],
   })
+  endCreate()
   return g.__fx0LibfxAgent
 }
 
@@ -265,7 +267,7 @@ export async function chatSession(
   turnId: number,
   sponsored = false,
 ): Promise<{ session: FxSession; libfxSessionId: string }> {
-  const id = libfxSessionId ?? await bindLibfxSession(host.id, await agent.newSessionId())
+  const id = libfxSessionId ?? await bindLibfxSession(host.id, await traceAsync('agent.session_id', undefined, () => agent.newSessionId()))
   libfxChats.set(id, host.id)
   return { session: agent.session(id, chatSessionOptions(host, instructions, turnId, sponsored)), libfxSessionId: id }
 }

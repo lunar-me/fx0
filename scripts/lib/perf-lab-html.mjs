@@ -28,6 +28,7 @@ const STAGES = {
   'net.workflow': 'Network: Vercel Workflow', 'net.queue': 'Network: Vercel Queues', 'net.oidc': 'Network: OIDC',
   'net.vercel_api': 'Network: Vercel API', 'net.redis': 'Network: Redis', 'net.neon': 'Network: Neon',
   'net.gateway': 'Network: AI Gateway', 'net.other': 'Network: other', 'prompt.journal': 'Journal write',
+  'agent.create': 'Create libfx agent', 'agent.session_id': 'New libfx session id',
   'prompt.credential': 'Save turn credential', 'prompt.hydrate': 'Hydrate session', 'prompt.bind': 'Bind libfx session',
   'prompt.accepted': 'Turn accepted', 'prompt.assets': 'Prepare assets', 'model.prepare': 'Model prepare',
   'model.headers': 'Model response headers', 'model.first_chunk': 'Model first chunk', 'model.stream': 'Model stream',
@@ -39,7 +40,7 @@ const STAGES = {
 }
 const MILESTONES = ['prompt.started', 'prompt.send', 'prompt.headers', 'prompt.first_content', 'prompt.finished']
 const FLAG_ARGS = new Set(['count', 'chars', 'bytes', 'status', 'failed', 'cancelled', 'first', 'seq', 'revision',
-  'fromPost', 'duplicate', 'step', 'incomplete'])
+  'fromPost', 'duplicate', 'step', 'incomplete', 'uptime'])
 const LANE = /^(?:browser|server:[A-Za-z0-9-]{1,64})$/u
 const ID = /^[A-Za-z0-9-]{1,64}$/u
 const ROW = 22

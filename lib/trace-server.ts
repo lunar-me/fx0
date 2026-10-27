@@ -28,6 +28,7 @@ interface TraceState {
   turns: Map<string, TraceContext>
   flushing?: Promise<void>
   warned?: boolean
+  served?: boolean
 }
 const globalTrace = globalThis as typeof globalThis & { __fx0PerformanceTrace?: TraceState }
 const noop = (_attrs?: TraceNumbers) => {}
@@ -153,7 +154,11 @@ export function runRequestTrace<T>(request: Request, work: () => Promise<T>): Pr
   if (!current) return work()
   const incoming = request.headers.get('x-fx0-trace')
   const traceId = validTraceId(incoming) ? incoming : randomUUID().replaceAll('-', '')
-  return current.context.run({ traceId }, () => traceAsync('request.handle', undefined, work))
+  // How long this process had lived when the request began, and whether it is the first
+  // traced request it serves: a small uptime on a first request marks a cold instance.
+  const processAttrs = { uptime: Math.round(process.uptime() * 1000), first: !current.served }
+  current.served = true
+  return current.context.run({ traceId }, () => traceAsync('request.handle', undefined, work, processAttrs))
 }
 
 export function serverTraceSnapshot() {

@@ -74,6 +74,7 @@ export function parseArgs(args) {
 const names = new Set([
   'request.handle', 'request.auth', 'request.revocation', 'request.owner', 'prompt.activate',
   'net.workflow', 'net.queue', 'net.oidc', 'net.vercel_api', 'net.redis', 'net.neon', 'net.gateway', 'net.other',
+  'agent.create', 'agent.session_id',
   'prompt.send', 'prompt.headers', 'prompt.journal',
   'prompt.credential', 'prompt.hydrate', 'prompt.bind', 'prompt.accepted', 'prompt.assets',
   'model.prepare', 'model.headers', 'model.first_chunk', 'model.stream', 'tool.execute',
@@ -84,7 +85,7 @@ const names = new Set([
   'prompt.turn', 'prompt.e2e',
 ])
 const numbers = ['count', 'chars', 'bytes', 'status', 'failed', 'cancelled', 'incomplete',
-  'first', 'seq', 'revision', 'fromPost', 'duplicate', 'step']
+  'first', 'seq', 'revision', 'fromPost', 'duplicate', 'step', 'uptime']
 
 // The app recorder already redacts content. Keep a second, bounded output boundary:
 // never persist arbitrary CDP values, DOM text, URLs, headers, console logs or cookies.
