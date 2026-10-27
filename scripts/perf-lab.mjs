@@ -280,9 +280,17 @@ async function ab(options) {
   await report(options.out)
 }
 
+// `next build` deletes .next, so a lab saved there silently loses every run.
+export function labDirectory(out) {
+  const resolved = path.resolve(out)
+  if (resolved.split(path.sep).includes('.next')) throw new Error('--out must be outside .next: next build deletes it (for example ~/.fx0-perf-labs/NAME)')
+  return resolved
+}
+
 export async function main(args = process.argv.slice(2)) {
   const { command, options } = parse(args)
   if (!command || command === '--help' || command === 'help') { console.log(help); return 0 }
+  if (typeof options.out === 'string') options.out = labDirectory(options.out)
   switch (command) {
     case 'login': await login(options); return 0
     case 'schedule':

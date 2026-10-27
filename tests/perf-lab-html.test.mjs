@@ -12,10 +12,13 @@ import { renderComparison, renderRun } from '../scripts/lib/perf-lab-html.mjs'
 import { launchChrome } from './fixtures/chrome-cdp.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const sampleDir = path.join(here, '..', '.next', 'fx0-perf', 'manual-32c447c3')
-const samplePresent = existsSync(path.join(sampleDir, 'browser.json')) && existsSync(path.join(sampleDir, 'server.json'))
-const skipSample = samplePresent ? false : 'captured sample not present in .next/fx0-perf/manual-32c447c3'
-const skipHeadless = process.env.FX0_PERF_LAB_HEADLESS === '1' && samplePresent ? false : 'set FX0_PERF_LAB_HEADLESS=1 to run headless Chrome'
+// A real vercel-preview prompt with its trace, chat and process identifiers replaced by
+// fixed fakes: only timings and allowlisted numbers remain. Committed so these tests
+// never skip because a local capture was deleted.
+const sampleDir = path.join(here, 'fixtures', 'perf-lab-sample')
+const skipSample = existsSync(path.join(sampleDir, 'browser.json')) && existsSync(path.join(sampleDir, 'server.json'))
+  ? false : 'tests/fixtures/perf-lab-sample is missing'
+const skipHeadless = process.env.FX0_PERF_LAB_HEADLESS === '1' && !skipSample ? false : 'set FX0_PERF_LAB_HEADLESS=1 to run headless Chrome'
 
 const RECORDED = '2026-10-26T20:20:00.000Z'
 const CONDITION = {
@@ -45,7 +48,7 @@ function sampleTexts() {
 }
 
 // Real captured browser and server batches, optionally re-keyed to a new traceId so several runs can share one sample.
-async function sampleRun({ traceId, label = 'manual-32c447c3', pairId = null, metadata = CONDITION } = {}) {
+async function sampleRun({ traceId, label = 'sample', pairId = null, metadata = CONDITION } = {}) {
   const { browser, server, original } = await sampleTexts()
   const swap = text => (traceId ? text.replaceAll(original, traceId) : text)
   return createRun({

@@ -72,6 +72,14 @@ test('report compares both labels and refuses deltas when settings are unknown',
   assert.deepEqual(comparison.metrics, [])
 })
 
+test('a lab inside .next is refused before anything is written, since next build deletes it', async t => {
+  const directory = await lab(t)
+  const out = path.join(directory, '.next', 'fx0-lab', 'x')
+  await assert.rejects(exec(['import', '--browser', path.join(directory, 'browser.json'), '--server', directory, '--out', out]),
+    error => /--out must be outside \.next/.test(error.stderr))
+  await assert.rejects(readdir(path.join(directory, '.next')), { code: 'ENOENT' })
+})
+
 test('schedule is balanced and reproducible; missing options fail before any capture', async () => {
   const first = (await exec(['schedule', '--pairs', '6', '--seed', 'fx0'])).stdout
   assert.equal(first, (await exec(['schedule', '--pairs', '6', '--seed', 'fx0'])).stdout)
