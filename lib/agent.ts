@@ -209,7 +209,9 @@ async function hydrateSession(host: SessionState): Promise<StoredSession | null>
 // Warm-up while the user types: the chat's state and the process's agent.
 export async function warmChat(host: SessionState): Promise<void> {
   await hydrateSession(host)
-  agent()
+  // newSessionId() loads libfx's durable backend (about 330 ms of module loading on a
+  // new instance) and returns an id without writing anything; the id is discarded.
+  await agent().newSessionId()
 }
 
 // Prompts this instance has submitted; the first one also pays for loading
