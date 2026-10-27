@@ -1178,6 +1178,31 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     void fetchUi(`/api/warm?session=${encodeURIComponent(id)}`, { method: 'POST' }).catch(() => {})
   }
 
+  // Before any chat exists, warm only the instance that will serve the next prompt: its
+  // libfx agent and durable backend. Background and fire-and-forget, at most once a
+  // minute, so nothing on screen waits for it.
+  const instanceWarmedAt = useRef(0)
+  function warmInstance() {
+    if (!isAuthenticated || !authAllowed.current || Date.now() - instanceWarmedAt.current < 60_000) return
+    instanceWarmedAt.current = Date.now()
+    void fetchUi('/api/warm', { method: 'POST' }).catch(() => {})
+  }
+  // Once the signed-in app is idle after its first paint, and whenever the tab returns.
+  useEffect(() => {
+    if (!isAuthenticated) return
+    const idleApi = typeof requestIdleCallback === 'function' && typeof cancelIdleCallback === 'function'
+    const idle = idleApi ? requestIdleCallback(() => warmInstance(), { timeout: 2000 }) : setTimeout(() => warmInstance(), 1000)
+    const onVisible = () => { if (document.visibilityState === 'visible') warmInstance() }
+    document.addEventListener?.('visibilitychange', onVisible)
+    return () => {
+      if (idleApi) cancelIdleCallback(idle as number)
+      else clearTimeout(idle as ReturnType<typeof setTimeout>)
+      document.removeEventListener?.('visibilitychange', onVisible)
+    }
+    // warmInstance reads refs and the current auth state; re-run only when auth changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated])
+
   function onComposerInput(text: string) {
     if (!text.trim() || !isAuthenticated || !authAllowed.current) return
     if (activeSession.current === 'draft') reserveDraftChat()
@@ -1193,6 +1218,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     pendingSend.current = false
     setChatReady(true)
     resetLocalDraft(hasIdentity && activeSession.current !== 'draft')
+    warmInstance()
   }
 
   // Back or Forward to a URL that opens no chat: show a new chat as New chat does,

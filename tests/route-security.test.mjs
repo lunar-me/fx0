@@ -123,6 +123,7 @@ const mocks = {
       globalThis.securityTest.trace.push(name);
     }
     export async function warmChat(host) { effect('warm', host); }
+    export async function warmProcess() { globalThis.securityTest.trace.push('warm-instance'); }
     export function assertPromptFunding() {}
     export function log() {}
     export async function submitPrompt(host, author, ...args) { effect('prompt', host); globalThis.securityTest.author = author; globalThis.securityTest.text = args[0]; globalThis.securityTest.funding = args[5]; return { id: 1, seq: globalThis.securityTest.submittedSeq ?? 1, trialChat: !!args[5] || !!globalThis.securityTest.generationOptions?.trialChat }; }
@@ -274,6 +275,35 @@ for (const name of ['answer', 'artifact', 'artifact-frame', 'capture', 'artifact
 const modelsRoute = await import('../app/api/models/route.ts')
 const page = await import('../app/page.tsx')
 const policy = await import('../lib/route-auth.ts')
+
+test('the instance warm-up needs a signed-in, same-origin caller and touches no chat', async () => {
+  let state = reset({ session: null })
+  let response = await routes.warm.POST(request('warm', 'POST', null))
+  const warmed = trace => trace.filter(step => step.startsWith('warm'))
+  assert.equal(response.status, 401)
+  assert.deepEqual(warmed(state.trace), [], 'no warm-up without a session')
+
+  state = reset()
+  response = await routes.warm.POST(request('warm', 'POST', null, undefined, 'https://evil.example'))
+  assert.ok(response.status >= 400, 'a cross-origin call is refused')
+  assert.deepEqual(warmed(state.trace), [])
+
+  state = reset()
+  response = await routes.warm.POST(request('warm', 'POST', null))
+  assert.equal(response.status, 204)
+  assert.deepEqual(state.trace.filter(step => step !== 'auth'), ['warm-instance'], 'only the instance warms: no chat, owner query or reservation')
+  assert.equal(state.queries.length, 0)
+
+  // With a chat id, the per-chat warm-up keeps its ownership check.
+  state = reset()
+  response = await routes.warm.POST(request('warm', 'POST', foreign))
+  assert.ok(response.status >= 400)
+  assert.ok(!state.trace.includes('warm') && !state.trace.includes('warm-instance'))
+  state = reset()
+  response = await routes.warm.POST(request('warm', 'POST', own))
+  assert.equal(response.status, 204)
+  assert.ok(state.trace.includes('warm'))
+})
 
 test('a human without OAuth can send five sponsored prompts, and the sixth never reaches the agent', async () => {
   const state = reset({ session: null, trialEnabled: true })
