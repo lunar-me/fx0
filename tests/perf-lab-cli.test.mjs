@@ -79,13 +79,16 @@ test('think time becomes part of a workload id the run validator accepts', async
   assert.equal(workloadFor({ 'think-ms': '3000' }, 'Reply exactly OK. Do not use tools.'), 'reply-ok-think3000ms')
   assert.equal(workloadFor({ 'think-ms': '3000', workload: 'bookshop' }, 'x'), 'bookshop-think3000ms')
   assert.throws(() => workloadFor({ 'think-ms': '-1' }, 'x'))
+  assert.equal(workloadFor({ 'follow-up-gap-ms': '0' }, 'Reply exactly OK. Do not use tools.'), 'reply-ok-gap0ms')
+  assert.equal(workloadFor({ 'think-ms': '3000', 'follow-up-gap-ms': '300000' }, 'Reply exactly OK. Do not use tools.'), 'reply-ok-think3000ms-gap300000ms')
+  assert.throws(() => workloadFor({ 'follow-up-gap-ms': 'soon' }, 'x'))
   const metadata = {
     environment: 'vercel-preview', durability: 'vercel', condition: 'cold', workloadHash: null, model: 'unknown',
     reasoningEffort: 'unknown', fast: null, accountHash: null, teamHash: null, viewport: null, revision: null,
     sourceHash: null, instrumentation: 'fx0-trace-v1', history: 'new-chat', capture: 'headless', startBoundary: 'handler',
   }
   const run = workload => createRun({ browser, server, metadata: { ...metadata, workload }, label: 'baseline', recordedAt: '2026-10-27T00:00:00.000Z' })
-  for (const workload of ['reply-ok', 'reply-ok-think3000ms']) assert.equal(run(workload).metadata.workload, workload)
+  for (const workload of ['reply-ok', 'reply-ok-think3000ms', 'reply-ok-think3000ms-gap300000ms']) assert.equal(run(workload).metadata.workload, workload)
   assert.throws(() => run('reply-ok@think3000ms'), /workload/, 'the validator rejects the old suffix')
 })
 

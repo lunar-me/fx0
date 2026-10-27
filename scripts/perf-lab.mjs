@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { tmpdir } from 'node:os'
 import { createPerfProfile, labTargetUrl, launchChrome } from '../tests/fixtures/chrome-cdp.mjs'
-import { run as runPrompt } from './perf-e2e.mjs'
+import { run as runPrompt, sanitizePageLoad } from './perf-e2e.mjs'
 import { loadTraceFiles } from './trace-report.mjs'
 import { compareRuns, createRun, makeSchedule } from './lib/perf-lab-data.mjs'
 import { renderComparison, renderRun } from './lib/perf-lab-html.mjs'
@@ -21,11 +21,13 @@ const help = `Usage: node scripts/perf-lab.mjs <command> [options]
             Create a dedicated fx0 performance profile and sign in once in its own Chrome window.
   run       --profile DIR --url URL --out LAB [--label baseline|candidate] [--pair ID]
             [--source DIR] [--prompt TEXT] [--workload ID] [--condition cold|warm]
+            [--think-ms N] [--follow-up-gap-ms N (measure a second prompt sent N ms after the first finished)]
             [--environment local-development|local-production] [--durability local-file|vercel]
             One LIVE prompt in headless Chrome, saved as a run with its server trace.
   ab        --profile DIR --out LAB --pairs N --seed S
             --baseline-url URL --baseline-source DIR --candidate-url URL --candidate-source DIR
             [--warmup N (default 1 per side)] [--prompt TEXT] [--workload ID] [--environment ...] [--durability ...]
+            [--think-ms N] [--follow-up-gap-ms N]
             Balanced, seeded A/B: 2*N measured LIVE prompts plus warmups. Failures are kept, never retried.
   import    --browser FILE --server FILE|DIR --out LAB [--label L] [--pair ID] [--workload ID]
             [--condition ...] [--environment ...] [--durability ...]
@@ -105,11 +107,25 @@ function thinkMs(options) {
   return integer(options['think-ms'] ?? '0', 'think-ms', 0, 30000)
 }
 
-// Think time is part of the workload, so runs with different pauses never compare.
+// A follow-up run measures a second prompt sent this long after the first one finished.
+function followUpGapMs(options) {
+  return options['follow-up-gap-ms'] == null ? null : integer(options['follow-up-gap-ms'], 'follow-up-gap-ms', 0, 3_600_000)
+}
+
+// Driver options shared by measured runs and warm-ups. The deadline covers the gap.
+function driverOptions(options, url, prompt) {
+  const gap = followUpGapMs(options)
+  return { url, prompt, timeoutMs: 180000 + (gap ?? 0), headless: true, profileDirectory: options.profile,
+    thinkMs: thinkMs(options), followUpGapMs: gap }
+}
+
+// Think time and the follow-up gap are part of the workload, so runs with different
+// pauses never compare.
 export function workloadFor(options, prompt) {
   const base = options.workload ?? (prompt === DEFAULT_PROMPT ? 'reply-ok' : 'custom')
   const pause = thinkMs(options)
-  return pause ? `${base}-think${pause}ms` : base
+  const gap = followUpGapMs(options)
+  return `${base}${pause ? `-think${pause}ms` : ''}${gap == null ? '' : `-gap${gap}ms`}`
 }
 
 function metadataFor(options, { context = {}, identity: who = {}, source = {}, prompt, capture, kind = 'local' }) {
@@ -182,7 +198,7 @@ async function capture(options, { url, source, label, pair, who, sourceId }) {
   let summary
   let artifactDirectory
   try {
-    summary = await runPrompt({ url, prompt, timeoutMs: 180000, headless: true, profileDirectory: options.profile, thinkMs: thinkMs(options) })
+    summary = await runPrompt(driverOptions(options, url, prompt))
     artifactDirectory = summary.artifactDirectory
   } catch (error) {
     artifactDirectory = error.artifactDirectory
@@ -203,6 +219,8 @@ async function capture(options, { url, source, label, pair, who, sourceId }) {
     browser, server, label, pairId: pair ?? null, recordedAt: new Date().toISOString(),
     metadata: metadataFor(options, { context, identity: who, source: sourceId, prompt, capture: 'headless', kind: target.kind }),
   })
+  // Page-load guard rails (numbers only), kept beside the run for render comparisons.
+  record.page = sanitizePageLoad(summary?.pageLoad ?? null)
   const file = await saveRun(options.out, record)
   const shown = record.metrics.firstTextMs == null ? record.status : `first text ${record.metrics.firstTextMs} ms, sending ${record.metrics.sendingMs} ms`
   console.log(`${label}${pair ? ` pair ${pair}` : ''}: ${shown} -> ${path.relative(process.cwd(), file)}`)
@@ -276,7 +294,7 @@ async function ab(options) {
   console.log(`Sending ${2 * pairs + 2 * warmup} live prompts (${warmup} warmup per side, excluded).`)
   for (const label of ['baseline', 'candidate']) {
     for (let index = 0; index < warmup; index++) {
-      await runPrompt({ url: sides[label].url, prompt: options.prompt ?? DEFAULT_PROMPT, timeoutMs: 180000, headless: true, profileDirectory: options.profile, thinkMs: thinkMs(options) })
+      await runPrompt(driverOptions(options, sides[label].url, options.prompt ?? DEFAULT_PROMPT))
         .catch(error => console.error(`Warmup ${label} failed: ${error.message}`))
     }
   }

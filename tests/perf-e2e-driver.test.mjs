@@ -7,7 +7,7 @@ import { homedir, hostname, tmpdir } from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
-import { enterIntervalsMs, inspectCapture, parseArgs, run, sanitizeSnapshot, submitWithEnter } from '../scripts/perf-e2e.mjs'
+import { enterIntervalsMs, inspectCapture, parseArgs, run, sanitizePageLoad, sanitizeSnapshot, submitWithEnter } from '../scripts/perf-e2e.mjs'
 import { connectCdp, createPerfProfile, inspectorJson, labTargetUrl, launchChrome, loopbackUrl } from './fixtures/chrome-cdp.mjs'
 
 const runner = fileURLToPath(new URL('../scripts/perf-e2e.mjs', import.meta.url))
@@ -471,4 +471,12 @@ test('a complete fixture turn reports only model, effort and fast, and nulls any
     await close()
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('page-load timings keep only bounded numbers', () => {
+  assert.deepEqual(sanitizePageLoad({ fcpMs: 812.345, lcpMs: 1200, domContentLoadedMs: 640.04, loadMs: 1900, composerReadyMs: 2100.06 }),
+    { fcpMs: 812.3, lcpMs: 1200, domContentLoadedMs: 640, loadMs: 1900, composerReadyMs: 2100.1 })
+  assert.deepEqual(sanitizePageLoad({ fcpMs: -1, lcpMs: Infinity, domContentLoadedMs: '640', loadMs: 700000, composerReadyMs: null, html: '<p>secret</p>' }),
+    { fcpMs: null, lcpMs: null, domContentLoadedMs: null, loadMs: null, composerReadyMs: null })
+  assert.deepEqual(sanitizePageLoad(null), { fcpMs: null, lcpMs: null, domContentLoadedMs: null, loadMs: null, composerReadyMs: null })
 })

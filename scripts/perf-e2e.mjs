@@ -208,6 +208,34 @@ const sendSelector = 'button[aria-label="Send message"]'
 // It validates the ready composer, send button, and nonempty draft; focuses that input;
 // observes the trusted keydown (timestamp only: no key value, draft, or DOM text); and
 // dispatches one keyDown/keyUp pair. A failed or lost reply is never retried.
+// Page-load timings from the browser's own Performance APIs, in ms from navigation start:
+// paint and load milestones, and when the runner first saw the composer ready (polled
+// every 200 ms, so coarse). Numbers only; anything else becomes null.
+export function sanitizePageLoad(value) {
+  const keys = ['fcpMs', 'lcpMs', 'domContentLoadedMs', 'loadMs', 'composerReadyMs']
+  const result = {}
+  for (const key of keys) {
+    const number = value?.[key]
+    result[key] = typeof number === 'number' && Number.isFinite(number) && number >= 0 && number <= 600000 ? Math.round(number * 10) / 10 : null
+  }
+  return result
+}
+
+const pageLoadProbe = `(async () => {
+  const navigation = performance.getEntriesByType('navigation')[0];
+  const fcp = performance.getEntriesByName('first-contentful-paint')[0]?.startTime ?? null;
+  const lcp = await new Promise(resolve => {
+    let last = null;
+    try {
+      const observer = new PerformanceObserver(list => { const entries = list.getEntries(); last = entries[entries.length - 1]?.startTime ?? last; });
+      observer.observe({ type: 'largest-contentful-paint', buffered: true });
+      setTimeout(() => { observer.disconnect(); resolve(last); }, 100);
+    } catch { resolve(null); }
+  });
+  return { fcpMs: fcp, lcpMs: lcp, domContentLoadedMs: navigation?.domContentLoadedEventEnd ?? null,
+    loadMs: navigation?.loadEventEnd ?? null, composerReadyMs: performance.now() };
+})()`
+
 export async function submitWithEnter(cdp, origin) {
   if (typeof origin !== 'string' || !origin) throw new Error('Expected app origin is required')
   // The browser helper redacts in-page exception text, so refusals are returned as fixed reasons.
@@ -298,6 +326,7 @@ export async function run(options) {
   let snapshot = { traceEvents: [], displayTimeUnit: 'ms', dropped: 0 }
   let analysis = { complete: false }
   let generation = unknownContext
+  let pageLoad = sanitizePageLoad(null)
   let failure
   let phase = 'Chrome startup'
   try {
@@ -319,6 +348,7 @@ export async function run(options) {
       catch { signal.throwIfAborted(); await delay(200, undefined, { signal }); continue }
       if (state?.onApp && state.ready) {
         if (!state.tracing) throw new Error('Browser tracing unavailable: build/start the local app with VERCEL= FX0_TRACE=1 before sending')
+        pageLoad = sanitizePageLoad(await cdp.evaluate(pageLoadProbe).catch(() => null))
         break
       }
       if (state?.signedOut && !loginPrinted) {
@@ -328,41 +358,57 @@ export async function run(options) {
       }
       await delay(200, undefined, { signal })
     }
-    phase = 'composer input'
-    await cdp.evaluate(`(() => {
-      if (location.origin !== ${JSON.stringify(app.origin)}) throw new Error('App origin changed');
-      const input = document.querySelector(${JSON.stringify(composerSelector)});
-      if (!input || input.disabled || input.readOnly || input.value) throw new Error('Composer unavailable or nonempty');
-      window.__fx0Trace.clear();
-      input.focus();
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, ${JSON.stringify(options.prompt)});
-      input.dispatchEvent(new Event('input', {bubbles:true}));
-    })()`)
-    while (!await cdp.evaluate(`location.origin === ${JSON.stringify(app.origin)} && (() => {
-      const button = document.querySelector('button[aria-label="Send message"]');
-      return !!button && !button.disabled;
-    })()`)) await delay(50, undefined, { signal })
-    // Optional think time between typing and Enter, as a person pauses before sending;
-    // the composer's typing warm-up runs during it. Zero keeps the immediate send.
-    if (options.thinkMs) await delay(options.thinkMs, undefined, { signal })
-    phase = 'prompt.started'
-    // Never retry this operation: a lost reply after the key event leaves the send state unknown.
-    submitted = true
-    enterTimestampUs = (await submitWithEnter(cdp, app.origin)).enterTimestampUs
-    const startDeadline = Math.min(deadline, performance.now() + 10000)
-    while (true) {
-      signal.throwIfAborted()
-      snapshot = sanitizeSnapshot(await cdp.evaluate(`(() => {
+    // A follow-up run sends a setup prompt first (not measured), keeps the page open for
+    // followUpGapMs, then measures a second prompt in the same chat.
+    const turns = options.followUpGapMs == null ? 1 : 2
+    for (let turn = 1; turn <= turns; turn++) {
+      if (turn === 2) {
+        phase = 'follow-up gap'
+        await delay(options.followUpGapMs, undefined, { signal })
+      }
+      phase = 'composer input'
+      await cdp.evaluate(`(() => {
         if (location.origin !== ${JSON.stringify(app.origin)}) throw new Error('App origin changed');
-        if (typeof window.__fx0Trace?.snapshot !== 'function') throw new Error('Trace unavailable');
-        return window.__fx0Trace.snapshot();
-      })()`))
-      analysis = inspectCapture(snapshot, enterTimestampUs)
-      if (snapshot.dropped) throw new Error('Browser trace dropped events; capture is incomplete')
-      if (analysis.traceId) phase = 'prompt.e2e (journal done and final artifact paint)'
-      else if (performance.now() >= startDeadline) throw new Error('No prompt.started within 10 seconds; prompt tracing must be wired into the real composer')
-      if (analysis.complete) break
-      await delay(100, undefined, { signal })
+        const input = document.querySelector(${JSON.stringify(composerSelector)});
+        if (!input || input.disabled || input.readOnly || input.value) throw new Error('Composer unavailable or nonempty');
+        window.__fx0Trace.clear();
+        input.focus();
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, ${JSON.stringify(options.prompt)});
+        input.dispatchEvent(new Event('input', {bubbles:true}));
+      })()`)
+      while (!await cdp.evaluate(`location.origin === ${JSON.stringify(app.origin)} && (() => {
+        const button = document.querySelector('button[aria-label="Send message"]');
+        return !!button && !button.disabled;
+      })()`)) await delay(50, undefined, { signal })
+      // Optional think time between typing and Enter, as a person pauses before sending;
+      // the composer's typing warm-up runs during it. Zero keeps the immediate send.
+      if (options.thinkMs) await delay(options.thinkMs, undefined, { signal })
+      phase = 'prompt.started'
+      // Never retry this operation: a lost reply after the key event leaves the send state unknown.
+      submitted = true
+      enterTimestampUs = (await submitWithEnter(cdp, app.origin)).enterTimestampUs
+      const startDeadline = Math.min(deadline, performance.now() + 10000)
+      while (true) {
+        signal.throwIfAborted()
+        snapshot = sanitizeSnapshot(await cdp.evaluate(`(() => {
+          if (location.origin !== ${JSON.stringify(app.origin)}) throw new Error('App origin changed');
+          if (typeof window.__fx0Trace?.snapshot !== 'function') throw new Error('Trace unavailable');
+          return window.__fx0Trace.snapshot();
+        })()`))
+        analysis = inspectCapture(snapshot, enterTimestampUs)
+        if (snapshot.dropped) throw new Error('Browser trace dropped events; capture is incomplete')
+        if (analysis.traceId) phase = 'prompt.e2e (journal done and final artifact paint)'
+        else if (performance.now() >= startDeadline) throw new Error('No prompt.started within 10 seconds; prompt tracing must be wired into the real composer')
+        if (analysis.complete) break
+        await delay(100, undefined, { signal })
+      }
+      if (turn < turns) {
+        // The composer accepts the next prompt once the setup turn has finished.
+        while (!await cdp.evaluate(`location.origin === ${JSON.stringify(app.origin)} && (() => {
+          const input = document.querySelector(${JSON.stringify(composerSelector)});
+          return !!input && !input.disabled && !input.readOnly && !input.value;
+        })()`)) await delay(100, undefined, { signal })
+      }
     }
     if (analysis.complete) generation = await readGenerationContext(cdp, app.origin, analysis.sessionId)
   } catch (error) {
@@ -381,10 +427,10 @@ export async function run(options) {
     context: {
       model: generation.model, reasoningEffort: generation.reasoningEffort, fast: generation.fast,
       viewport: { width: 1440, height: 1000, dpr: 1 },
-      history: app.searchParams.has('s') ? 'followup' : 'new-chat',
+      history: app.searchParams.has('s') || options.followUpGapMs != null ? 'followup' : 'new-chat',
       capture: options.headless ? 'headless' : 'headed', startBoundary: 'handler',
     },
-    runnerElapsedMs: performance.now() - started, sendAttempted: submitted,
+    runnerElapsedMs: performance.now() - started, sendAttempted: submitted, pageLoad,
     clock: 'browser performance clock, microsecond trace timestamps (timeOrigin + now)',
     labels: {
       milestonesMs: 'relative to prompt.started, the production send handler (not the Enter keypress)',
