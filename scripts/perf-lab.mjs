@@ -101,13 +101,18 @@ async function identity(profileDirectory, url) {
   } finally { await browser.close() }
 }
 
+function thinkMs(options) {
+  return integer(options['think-ms'] ?? '0', 'think-ms', 0, 30000)
+}
+
 function metadataFor(options, { context = {}, identity: who = {}, source = {}, prompt, capture, kind = 'local' }) {
   const known = value => (typeof value === 'string' && value ? value.toLowerCase() : 'unknown')
   return {
     environment: options.environment ?? (kind === 'preview' ? 'vercel-preview' : 'local-development'),
     durability: options.durability ?? (kind === 'preview' ? 'vercel' : 'local-file'),
     condition: options.condition ?? 'unknown',
-    workload: options.workload ?? (prompt === DEFAULT_PROMPT ? 'reply-ok' : 'custom'),
+    // Think time is part of the workload: runs with different pauses never compare.
+    workload: (options.workload ?? (prompt === DEFAULT_PROMPT ? 'reply-ok' : 'custom')) + (thinkMs(options) ? `@think${thinkMs(options)}ms` : ''),
     workloadHash: prompt ? sha256(prompt) : null,
     model: known(context.model),
     reasoningEffort: known(context.reasoningEffort),
@@ -171,7 +176,7 @@ async function capture(options, { url, source, label, pair, who, sourceId }) {
   let summary
   let artifactDirectory
   try {
-    summary = await runPrompt({ url, prompt, timeoutMs: 180000, headless: true, profileDirectory: options.profile })
+    summary = await runPrompt({ url, prompt, timeoutMs: 180000, headless: true, profileDirectory: options.profile, thinkMs: thinkMs(options) })
     artifactDirectory = summary.artifactDirectory
   } catch (error) {
     artifactDirectory = error.artifactDirectory
@@ -265,7 +270,7 @@ async function ab(options) {
   console.log(`Sending ${2 * pairs + 2 * warmup} live prompts (${warmup} warmup per side, excluded).`)
   for (const label of ['baseline', 'candidate']) {
     for (let index = 0; index < warmup; index++) {
-      await runPrompt({ url: sides[label].url, prompt: options.prompt ?? DEFAULT_PROMPT, timeoutMs: 180000, headless: true, profileDirectory: options.profile })
+      await runPrompt({ url: sides[label].url, prompt: options.prompt ?? DEFAULT_PROMPT, timeoutMs: 180000, headless: true, profileDirectory: options.profile, thinkMs: thinkMs(options) })
         .catch(error => console.error(`Warmup ${label} failed: ${error.message}`))
     }
   }

@@ -342,6 +342,9 @@ export async function run(options) {
       const button = document.querySelector('button[aria-label="Send message"]');
       return !!button && !button.disabled;
     })()`)) await delay(50, undefined, { signal })
+    // Optional think time between typing and Enter, as a person pauses before sending;
+    // the composer's typing warm-up runs during it. Zero keeps the immediate send.
+    if (options.thinkMs) await delay(options.thinkMs, undefined, { signal })
     phase = 'prompt.started'
     // Never retry this operation: a lost reply after the key event leaves the send state unknown.
     submitted = true
