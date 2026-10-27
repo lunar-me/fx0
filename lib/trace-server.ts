@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
+import diagnostics from 'node:diagnostics_channel'
 import { appendFile, mkdir } from 'node:fs/promises'
 import path from 'node:path'
 // @ts-expect-error Node strip-types tests require the source extension.
@@ -47,8 +48,49 @@ function state(): TraceState | undefined {
       const timer = setInterval(() => { void flushServerTrace() }, 250)
       timer.unref()
     }
+    observeNetwork(globalTrace.__fx0PerformanceTrace)
   }
   return globalTrace.__fx0PerformanceTrace
+}
+
+// Every undici client in the process, including copies bundled into dependencies such as
+// libfx's Vercel World, publishes its requests on these channels. Observing them never
+// changes a request. Only a fixed category, the status and the time to response headers
+// are recorded: never the URL, path, headers or body.
+export function networkCategory(origin: unknown, path: unknown): TraceName {
+  let host = ''
+  try { host = new URL(String(origin)).hostname } catch { return 'net.other' }
+  if (host === 'api.vercel.com') return String(path).startsWith('/v1/workflow') ? 'net.workflow' : 'net.vercel_api'
+  if (host.includes('vercel-queue')) return 'net.queue'
+  if (host === 'oidc.vercel.com') return 'net.oidc'
+  if (host.endsWith('.upstash.io')) return 'net.redis'
+  if (host.endsWith('.neon.tech')) return 'net.neon'
+  if (host === 'ai-gateway.vercel.sh') return 'net.gateway'
+  return 'net.other'
+}
+
+function observeNetwork(current: TraceState): void {
+  const open = new WeakMap<object, (attrs?: TraceNumbers) => void>()
+  const finish = (request: object, attrs: TraceNumbers) => {
+    const end = open.get(request)
+    if (!end) return
+    open.delete(request)
+    end(attrs)
+    if (serverTraceMode() === 'preview') exportPreview(current)
+  }
+  diagnostics.subscribe('undici:request:create', (message) => {
+    const request = (message as { request?: { origin?: unknown; path?: unknown } }).request
+    if (!request || typeof request !== 'object') return
+    open.set(request, current.recorder.start(networkCategory(request.origin, request.path), current.context.getStore()))
+  })
+  diagnostics.subscribe('undici:request:headers', (message) => {
+    const { request, response } = message as { request?: object; response?: { statusCode?: unknown } }
+    if (request) finish(request, { status: typeof response?.statusCode === 'number' ? response.statusCode : 0 })
+  })
+  diagnostics.subscribe('undici:request:error', (message) => {
+    const { request } = message as { request?: object }
+    if (request) finish(request, { failed: true })
+  })
 }
 
 // A preview's completed records leave as one JSON line tagged 'fx0:trace', at each span end

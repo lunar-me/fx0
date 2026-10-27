@@ -2,7 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
-import { launchChrome, loopbackUrl } from '../tests/fixtures/chrome-cdp.mjs'
+import { labTargetUrl, launchChrome } from '../tests/fixtures/chrome-cdp.mjs'
 
 const help = `Usage: node scripts/perf-e2e.mjs --url http://localhost:3000 [--prompt '...'] [--timeout-ms 180000] [--headed]
 
@@ -15,7 +15,8 @@ No external cookies are read and no existing Chrome profile is controlled.
 Build/start the local app with FX0_TRACE=1 (and VERCEL= if that marker was pulled into .env.local).
 Requires Node 24 and Chrome; CHROME_PATH may name an absolute Chrome executable.
 
-  --url         Required loopback HTTP(S) app URL; username/password forbidden.
+  --url         Required loopback HTTP(S) URL, or an fx0 preview over HTTPS
+                (fx0-*.labs.vercel.dev, fx0-*.vercel.app). Production is refused.
   --prompt      Plain prompt (not a slash command), at most 16,000 characters.
   --timeout-ms  Total deadline including startup/login/generation (default 180000).
   --headed      Show a fresh Chrome window so you can sign in once (default: headless).
@@ -50,7 +51,7 @@ export function parseArgs(args) {
     }
     const value = args[++index]
     if (value == null || value.startsWith('--')) throw new Error('Missing option value; use --help')
-    if (flag === '--url') result.url = loopbackUrl(value).href
+    if (flag === '--url') result.url = labTargetUrl(value).url.href
     if (flag === '--prompt') result.prompt = value
     if (flag === '--profile') {
       // Errors never echo the path: it may name a private directory.
@@ -72,6 +73,7 @@ export function parseArgs(args) {
 
 const names = new Set([
   'request.handle', 'request.auth', 'request.revocation', 'request.owner', 'prompt.activate',
+  'net.workflow', 'net.queue', 'net.oidc', 'net.vercel_api', 'net.redis', 'net.neon', 'net.gateway', 'net.other',
   'prompt.send', 'prompt.headers', 'prompt.journal',
   'prompt.credential', 'prompt.hydrate', 'prompt.bind', 'prompt.accepted', 'prompt.assets',
   'model.prepare', 'model.headers', 'model.first_chunk', 'model.stream', 'tool.execute',
@@ -277,7 +279,7 @@ async function readGenerationContext(cdp, origin, sessionId) {
 
 export async function run(options) {
   // Recheck the destination before any process or network side effects.
-  const app = loopbackUrl(options.url)
+  const app = labTargetUrl(options.url).url
   console.error('WARNING: development-only LIVE prompt; this may incur charges and creates a chat/turn. No mock generation. Temporary or dedicated fx0 profile only.')
   const controller = new AbortController()
   const { signal } = controller

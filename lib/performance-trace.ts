@@ -2,6 +2,7 @@
 // measurements can leave the recorder; request/model content is never accepted.
 export type TraceName =
   | 'request.handle' | 'request.auth' | 'request.revocation' | 'request.owner' | 'prompt.activate'
+  | 'net.workflow' | 'net.queue' | 'net.oidc' | 'net.vercel_api' | 'net.redis' | 'net.neon' | 'net.gateway' | 'net.other'
   | 'prompt.send' | 'prompt.headers' | 'prompt.journal' | 'prompt.credential'
   | 'prompt.hydrate' | 'prompt.bind' | 'prompt.accepted' | 'prompt.assets'
   | 'model.prepare' | 'model.headers' | 'model.first_chunk' | 'model.stream'
@@ -19,6 +20,7 @@ export type TraceNumbers = Partial<Record<
 
 const names = new Set<TraceName>([
   'request.handle', 'request.auth', 'request.revocation', 'request.owner', 'prompt.activate',
+  'net.workflow', 'net.queue', 'net.oidc', 'net.vercel_api', 'net.redis', 'net.neon', 'net.gateway', 'net.other',
   'prompt.send', 'prompt.headers', 'prompt.journal',
   'prompt.credential', 'prompt.hydrate', 'prompt.bind', 'prompt.accepted', 'prompt.assets',
   'model.prepare', 'model.headers', 'model.first_chunk', 'model.stream', 'tool.execute',

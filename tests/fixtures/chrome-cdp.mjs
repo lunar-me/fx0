@@ -72,6 +72,20 @@ export function loopbackUrl(input) {
   return url
 }
 
+// Where a live performance run may send a prompt: this machine, or an fx0 Vercel
+// preview over HTTPS. Production (fx0.vercel.dev or any custom domain) is never accepted.
+const PREVIEW_HOST = /^fx0-[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:labs\.vercel\.dev|vercel\.app)$/
+export function labTargetUrl(input) {
+  try { return { url: loopbackUrl(input), kind: 'local' } } catch {}
+  if (typeof input !== 'string' || /[\s\\\x00-\x1f\x7f]/u.test(input)) throw new Error('URL must be loopback or an fx0 preview over HTTPS')
+  let url
+  try { url = new URL(input) } catch { throw new Error('Invalid URL') }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || !PREVIEW_HOST.test(url.hostname)) {
+    throw new Error('URL must be loopback or an fx0 preview over HTTPS (fx0-*.labs.vercel.dev or fx0-*.vercel.app); production is never measured')
+  }
+  return { url, kind: 'preview' }
+}
+
 // The inspector is always the owned Chrome's numeric IPv4 loopback endpoint.
 export function inspectorJson(port, route, { timeoutMs = 5000, signal } = {}) {
   if (!Number.isInteger(port) || port < 1 || port > 65535 || !['/json/version', '/json/list'].includes(route)) {

@@ -8,7 +8,8 @@ import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
-import { createPerfProfile, launchChrome, loopbackUrl } from '../tests/fixtures/chrome-cdp.mjs'
+import { tmpdir } from 'node:os'
+import { createPerfProfile, labTargetUrl, launchChrome } from '../tests/fixtures/chrome-cdp.mjs'
 import { run as runPrompt } from './perf-e2e.mjs'
 import { loadTraceFiles } from './trace-report.mjs'
 import { compareRuns, createRun, makeSchedule } from './lib/perf-lab-data.mjs'
@@ -80,7 +81,7 @@ async function sourceIdentity(directory) {
 
 // Account and team are recorded as hashes only, read once per campaign through routes the UI uses.
 async function identity(profileDirectory, url) {
-  const app = loopbackUrl(url)
+  const app = labTargetUrl(url).url
   const browser = await launchChrome({ headless: true, profileDirectory })
   try {
     await browser.cdp.send('Page.navigate', { url: app.origin + '/' })
@@ -100,11 +101,11 @@ async function identity(profileDirectory, url) {
   } finally { await browser.close() }
 }
 
-function metadataFor(options, { context = {}, identity: who = {}, source = {}, prompt, capture }) {
+function metadataFor(options, { context = {}, identity: who = {}, source = {}, prompt, capture, kind = 'local' }) {
   const known = value => (typeof value === 'string' && value ? value.toLowerCase() : 'unknown')
   return {
-    environment: options.environment ?? 'local-development',
-    durability: options.durability ?? 'local-file',
+    environment: options.environment ?? (kind === 'preview' ? 'vercel-preview' : 'local-development'),
+    durability: options.durability ?? (kind === 'preview' ? 'vercel' : 'local-file'),
     condition: options.condition ?? 'unknown',
     workload: options.workload ?? (prompt === DEFAULT_PROMPT ? 'reply-ok' : 'custom'),
     workloadHash: prompt ? sha256(prompt) : null,
@@ -129,6 +130,34 @@ async function serverTrace(traceDirectory, traceId) {
   return { traceEvents: loaded.traceEvents.filter(event => event.args?.traceId === traceId), displayTimeUnit: 'ms', dropped: loaded.dropped }
 }
 
+// A preview's spans arrive through its function logs, a few seconds late. Poll the
+// deployment's logs for this exact trace id until its span count stops growing.
+async function previewServerTrace(appUrl, traceId, options) {
+  const cli = ['vercel', '/opt/homebrew/bin/vercel', '/usr/local/bin/vercel']
+  const directory = path.join(tmpdir(), `fx0-perf-logs-${process.pid}`)
+  await mkdir(directory, { recursive: true, mode: 0o700 })
+  const file = path.join(directory, `${traceId}.jsonl`)
+  let best = { traceEvents: [], displayTimeUnit: 'ms', dropped: 0 }
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await delay(attempt ? 4000 : 6000)
+    let stdout = ''
+    for (const binary of cli) {
+      try {
+        stdout = (await run(binary, ['logs', '--scope', options['vercel-scope'] ?? 'vercel-labs', '--project', options['vercel-project'] ?? 'fx0',
+          '--deployment', appUrl.origin, '--since', '30m', '--query', traceId, '--json', '--non-interactive'],
+          { maxBuffer: 64 * 1024 * 1024, encoding: 'utf8' })).stdout
+        break
+      } catch (error) { if (error.code !== 'ENOENT') break }
+    }
+    await writeFile(file, stdout.split('\n').filter(line => line.startsWith('{')).join('\n') + '\n', { mode: 0o600 })
+    const loaded = await loadTraceFiles([file]).catch(() => ({ traceEvents: [], dropped: 0 }))
+    const events = loaded.traceEvents.filter(event => event.args?.traceId === traceId)
+    if (events.length && events.length === best.traceEvents.length) return best
+    if (events.length >= best.traceEvents.length) best = { traceEvents: events, displayTimeUnit: 'ms', dropped: loaded.dropped }
+  }
+  return best
+}
+
 async function saveRun(lab, runRecord) {
   await mkdir(path.join(lab, 'runs'), { recursive: true, mode: 0o700 })
   const name = `${runRecord.label}-${runRecord.pairId ?? 'x'}-${runRecord.id}.json`
@@ -151,12 +180,17 @@ async function capture(options, { url, source, label, pair, who, sourceId }) {
   }
   const browser = JSON.parse(await readFile(path.join(artifactDirectory, 'trace.json'), 'utf8'))
   const traceId = browser.traceEvents.find(event => event.name === 'prompt.started')?.args?.traceId
-  await delay(800) // local server batches flush every 250 ms
-  const server = traceId ? await serverTrace(path.join(source, '.next/fx0-traces'), traceId) : null
+  const target = labTargetUrl(url)
+  let server = null
+  if (traceId && target.kind === 'preview') server = await previewServerTrace(target.url, traceId, options)
+  else if (traceId) {
+    await delay(800) // local server batches flush every 250 ms
+    server = await serverTrace(path.join(source, '.next/fx0-traces'), traceId)
+  }
   const context = summary?.context ?? JSON.parse(await readFile(path.join(artifactDirectory, 'summary.json'), 'utf8')).context ?? {}
   const record = createRun({
     browser, server, label, pairId: pair ?? null, recordedAt: new Date().toISOString(),
-    metadata: metadataFor(options, { context, identity: who, source: sourceId, prompt, capture: 'headless' }),
+    metadata: metadataFor(options, { context, identity: who, source: sourceId, prompt, capture: 'headless', kind: target.kind }),
   })
   const file = await saveRun(options.out, record)
   const shown = record.metrics.firstTextMs == null ? record.status : `first text ${record.metrics.firstTextMs} ms, sending ${record.metrics.sendingMs} ms`
@@ -196,7 +230,7 @@ async function report(lab) {
 
 async function login(options) {
   required(options, 'profile', 'url')
-  const app = loopbackUrl(options.url)
+  const app = labTargetUrl(options.url).url
   const profileDirectory = await createPerfProfile(options.profile)
   const browser = await launchChrome({ headless: false, profileDirectory })
   try {
@@ -222,7 +256,7 @@ async function ab(options) {
     candidate: { url: options['candidate-url'], source: path.resolve(options['candidate-source']) },
   }
   for (const side of Object.values(sides)) {
-    loopbackUrl(side.url)
+    labTargetUrl(side.url)
     side.sourceId = await sourceIdentity(side.source)
   }
   if (sides.baseline.sourceId.sourceHash === sides.candidate.sourceId.sourceHash) console.log('Same source on both sides: this is an A/A noise control.')

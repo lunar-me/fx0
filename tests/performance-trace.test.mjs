@@ -59,6 +59,53 @@ function previewPayloads(result) {
   })
 }
 
+// Network spans: real undici requests and bundled-client channel messages, observed only by
+// category, status and timing. The URL, path and headers never reach the recorder.
+const NETWORK_SCENARIO = `
+  import diagnostics from 'node:diagnostics_channel';
+  import { createServer } from 'node:http';
+  import { runRequestTrace, serverTraceSnapshot, networkCategory } from ${JSON.stringify(TRACE_MODULE)};
+  const server = createServer((_request, response) => response.end('ok'));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  await runRequestTrace(new Request('http://localhost/api/prompt', { headers: { 'x-fx0-trace': ${JSON.stringify(TRACE_ID)} } }), async () => {
+    await (await fetch('http://127.0.0.1:' + server.address().port + '/private/path?token=secret-token')).text();
+    const request = { origin: 'https://api.vercel.com', path: '/v1/workflow/runs?token=secret-token' };
+    diagnostics.channel('undici:request:create').publish({ request });
+    diagnostics.channel('undici:request:headers').publish({ request, response: { statusCode: 201 } });
+    const failing = { origin: 'https://example-queue.vercel-queue.com', path: '/send' };
+    diagnostics.channel('undici:request:create').publish({ request: failing });
+    diagnostics.channel('undici:request:error').publish({ request: failing, error: new Error('secret-token') });
+  });
+  server.close();
+  process.stdout.write(JSON.stringify({
+    snapshot: serverTraceSnapshot(),
+    categories: [
+      networkCategory('https://api.vercel.com', '/v2/teams'), networkCategory('https://oidc.vercel.com', '/'),
+      networkCategory('https://us1-x.upstash.io', '/get'), networkCategory('https://ep-x.us-east-1.aws.neon.tech', '/sql'),
+      networkCategory('https://ai-gateway.vercel.sh', '/v1'), networkCategory('not a url', '/'),
+    ],
+  }));
+`
+
+test('network spans record only a category, status and timing for every undici request', () => {
+  const run = env => JSON.parse(execFileSync(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', NETWORK_SCENARIO],
+    { env, encoding: 'utf8' }))
+  const local = run({ ...hostEnv, FX0_TRACE: '1' })
+  const events = local.snapshot.traceEvents.filter(event => event.name.startsWith('net.'))
+  const byName = Object.fromEntries(events.map(event => [event.name, event]))
+  assert.equal(byName['net.other'].args.status, 200, 'a real fetch through undici is observed')
+  assert.equal(byName['net.workflow'].args.status, 201)
+  assert.equal(byName['net.queue'].args.failed, true)
+  for (const event of events) {
+    assert.equal(event.args.traceId, TRACE_ID, 'network spans join the request trace')
+    assert.ok(event.dur >= 0)
+  }
+  assert.doesNotMatch(JSON.stringify(local.snapshot), /secret-token|private\/path|api\.vercel\.com|127\.0\.0\.1|workflow\/runs/)
+  assert.deepEqual(local.categories, ['net.vercel_api', 'net.oidc', 'net.redis', 'net.neon', 'net.gateway', 'net.other'])
+  const production = run({ ...hostEnv, VERCEL: '1', VERCEL_ENV: 'production', FX0_TRACE: '1', FX0_TRACE_PREVIEW: '1' })
+  assert.deepEqual(production.snapshot.traceEvents, [], 'production never observes the network')
+})
+
 test('disabled tracing reads no clock and stores no events', () => {
   const trace = createTraceRecorder({ enabled: false, process: 'test', now: () => { throw new Error('clock read') } })
   trace.start('prompt.send', context)()

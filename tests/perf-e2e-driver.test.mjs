@@ -8,7 +8,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { enterIntervalsMs, inspectCapture, parseArgs, run, sanitizeSnapshot, submitWithEnter } from '../scripts/perf-e2e.mjs'
-import { connectCdp, createPerfProfile, inspectorJson, launchChrome, loopbackUrl } from './fixtures/chrome-cdp.mjs'
+import { connectCdp, createPerfProfile, inspectorJson, labTargetUrl, launchChrome, loopbackUrl } from './fixtures/chrome-cdp.mjs'
 
 const runner = fileURLToPath(new URL('../scripts/perf-e2e.mjs', import.meta.url))
 const execute = promisify(execFile)
@@ -74,6 +74,21 @@ test('argument validation is loopback-only, bounded, and never echoes unsafe inp
     assert.throws(() => parseArgs(['--url', 'http://localhost:3000', ...extra]))
   }
   assert.equal(parseArgs(['--url', 'http://localhost:3000', '--prompt', 'Quote " and backtick `\nnext line']).prompt, 'Quote " and backtick `\nnext line')
+})
+
+test('a live run targets only this machine or an fx0 preview over HTTPS, never production', () => {
+  assert.equal(labTargetUrl('http://localhost:3000').kind, 'local')
+  for (const url of ['https://fx0-git-esteban-fx0-request-tracing.labs.vercel.dev/', 'https://fx0-abc123.labs.vercel.dev',
+    'https://fx0-git-branch-team.vercel.app/?s=00000000-0000-4000-8000-000000000001']) {
+    assert.equal(labTargetUrl(url).kind, 'preview')
+    assert.equal(parseArgs(['--url', url]).url, new URL(url).href)
+  }
+  for (const url of ['https://fx0.vercel.dev', 'https://fx0.vercel.app', 'https://fx0.labs.vercel.dev', 'http://fx0-abc.labs.vercel.dev',
+    'https://fx0-abc.labs.vercel.dev:8443', 'https://user:pass@fx0-abc.labs.vercel.dev', 'https://fx0-abc.labs.vercel.dev.evil.com',
+    'https://evil.com/fx0-abc.labs.vercel.dev', 'https://other-abc.labs.vercel.dev', 'https://fx0-abc.vercel.dev']) {
+    assert.throws(() => labTargetUrl(url), /production is never measured|loopback or an fx0 preview|Invalid URL/, url)
+    assert.throws(() => parseArgs(['--url', url]), url)
+  }
 })
 
 test('trace output boundary drops content and does not mistake stream end for completion', () => {

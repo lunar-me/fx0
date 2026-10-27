@@ -74,6 +74,30 @@ Two more observations:
 - The headless driver types and presses Enter immediately. The draft reservation (`POST /api/sessions`) and the typing warm-up (`POST /api/warm`) therefore race the prompt in the same process. Real users usually type for seconds first, so local runs include contention that real sends mostly avoid. This is equal on both A/B sides, but it inflates variance.
 - The server trace recorder lives in a process global and keeps its allowlist across hot reloads. **Restart `next dev` after adding trace names**, or new spans are silently dropped.
 
+## Production-like anatomy (vercel-preview, warm)
+
+Preview `fx0-git-esteban-fx0-request-tracing.labs.vercel.dev`, commit `d5b8bc7`, tracing enabled only for that branch through `FX0_TRACE_PREVIEW=1`. Lab `preview-aa`: 6 warm prompts in 3 A/A pairs, plus 1 excluded cold sample. Medians:
+
+| Stage | Median | Note |
+| --- | ---: | --- |
+| `request.revocation` | 4 ms | |
+| `request.owner` | 14 ms | |
+| `prompt.journal` + `credential` + `hydrate` + `bind` | ~25 ms | `bind` was 326 ms once (cold libfx backend) |
+| **`prompt.accepted` (libfx Vercel admission)** | **549 ms** | **92 % of the handler** |
+| Handler total | 599 ms | |
+| Outside the handler (browser ↔ Vercel network) | ~320 ms | Sending minus handler |
+| **Sending** | **849 ms** | |
+| Accepted → `model.prepare` start (libfx turn start in the request) | ~196 ms | |
+| `model.prepare` | 17 ms | |
+| `model.headers` (AI Gateway TTFB) | ~741 ms | Once 1.5 s |
+| **First text** | **2.55 s** | Local was 3.4–4.2 s |
+
+The cold first sample took 2.59 s Sending: `prompt.bind` 453 ms and `prompt.accepted` 1124 ms.
+
+**Correction to Experiment 1:** in production, fx0's own database stages total ~45 ms, so early headers save ~18 ms and the parallel credential save at most ~10 ms. The local −333 ms came from laptop-to-iad1 round trips and does not transfer. The real targets are libfx admission (549 ms), libfx turn start (~196 ms), and model TTFB (~741 ms).
+
+To see inside admission, the server recorder now also observes every undici request through `diagnostics_channel`, including the copy bundled into libfx's Vercel World. It records only a fixed category (`net.workflow`, `net.queue`, `net.oidc`, `net.vercel_api`, `net.redis`, `net.neon`, `net.gateway`, `net.other`), the status, and the time to response headers. It never records the URL, path, headers or body. It only runs when tracing is enabled, and never in production.
+
 ## Candidate ideas
 
 | Idea | Expected effect | Security assessment | Status |
@@ -87,4 +111,5 @@ Two more observations:
 | Funding read for each model step in one round trip (credential + revocation) | −1 round trip per model step, on the first-text path | Same authoritative read and revocation check, from one consistent snapshot | Proposed |
 | Return session state from the journal script (journal + hydrate) | −1 round trip on admission | Same owner-checked chat and data; no new trust | Proposed |
 | Run revocation and ownership reads together, act only after both pass | −1 round trip on every chat route | Reads only; nothing is written or returned before both checks pass | Proposed |
-| Measure on a Vercel preview with `FX0_TRACE_PREVIEW=1` | Real production anatomy | Tracing stays off in production by code | **Next; needs push + branch-scoped env var** |
+| Measure on a Vercel preview with `FX0_TRACE_PREVIEW=1` | Real production anatomy | Tracing stays off in production by code | Done |
+| Decompose libfx admission (549 ms) with network spans | Find serial World/Queue calls | Measurement only | In progress |
