@@ -61,6 +61,7 @@ export function networkCategory(origin: unknown, path: unknown): TraceName {
   let host = ''
   try { host = new URL(String(origin)).hostname } catch { return 'net.other' }
   if (host === 'api.vercel.com') return String(path).startsWith('/v1/workflow') ? 'net.workflow' : 'net.vercel_api'
+  if (host === 'vercel-workflow.com' || host.endsWith('.vercel-workflow.com')) return 'net.workflow'
   if (host.includes('vercel-queue')) return 'net.queue'
   if (host === 'oidc.vercel.com') return 'net.oidc'
   if (host.endsWith('.upstash.io')) return 'net.redis'

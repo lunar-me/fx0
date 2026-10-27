@@ -98,6 +98,26 @@ The cold first sample took 2.59 s Sending: `prompt.bind` 453 ms and `prompt.acce
 
 To see inside admission, the server recorder now also observes every undici request through `diagnostics_channel`, including the copy bundled into libfx's Vercel World. It records only a fixed category (`net.workflow`, `net.queue`, `net.oidc`, `net.vercel_api`, `net.redis`, `net.neon`, `net.gateway`, `net.other`), the status, and the time to response headers. It never records the URL, path, headers or body. It only runs when tracing is enabled, and never in production.
 
+## Inside libfx admission (vercel-preview, network spans)
+
+Lab `preview-net`, commit `9a418d1`, 4 warm prompts to new chats. `prompt.accepted` took 377–534 ms (Sending 605–771 ms; first text 1.82–2.09 s). Its network calls are the same in every run, and all serial:
+
+| # | Call | Status | Duration |
+| --- | --- | --- | ---: |
+| 1 | Session log length (`log.ui.length()`) | 404 | 43–114 ms |
+| 2 | Session log read, twice in parallel (caller's `log.read()` and the one inside `send()`) | 404, 404 | 40–60 ms |
+| 3–5 | Three Workflow writes (message record and seeding) | 200 | 49–62, 55–92, 72–186 ms |
+| 6 | Vercel Queues backstop | 201 | 49–84 ms |
+
+Reading `libfx` 0.0.14 `durable.js` (`startTurn` / `send`) explains this. fx0 passes an explicit `messageId` so a retried send cannot duplicate the message, which takes the idempotent path: read the log length, then read the log while `send()` opens the session, reads the log again, records the message, and sends the queue backstop. Then `turn.accepted` resolves.
+
+- Calls 1–2 read a session that this same request just created with `newSessionId()`. For a chat's first message they cannot find anything (404 every time). That is ~100–170 ms of serial reads with no information.
+- Recording the message and creating the backstop before acknowledging are durability contracts (no accepted message may be lost if the function dies). They stay.
+- The three writes are serial; whether any can be combined without losing atomicity is a libfx question.
+- After admission, the turn starts in the same request: Redis/Neon funding reads (~10 ms) and more Workflow writes (100–460 ms, partly in parallel), then `model.prepare` and the Gateway call.
+
+Host `vercel-workflow.com` was initially classified `net.other`. It is now `net.workflow`.
+
 ## Candidate ideas
 
 | Idea | Expected effect | Security assessment | Status |
@@ -112,4 +132,7 @@ To see inside admission, the server recorder now also observes every undici requ
 | Return session state from the journal script (journal + hydrate) | −1 round trip on admission | Same owner-checked chat and data; no new trust | Proposed |
 | Run revocation and ownership reads together, act only after both pass | −1 round trip on every chat route | Reads only; nothing is written or returned before both checks pass | Proposed |
 | Measure on a Vercel preview with `FX0_TRACE_PREVIEW=1` | Real production anatomy | Tracing stays off in production by code | Done |
-| Decompose libfx admission (549 ms) with network spans | Find serial World/Queue calls | Measurement only | In progress |
+| Decompose libfx admission (549 ms) with network spans | Found 6 serial calls | Measurement only | Done |
+| libfx: skip the pre-reads for a session created in the same request | Sending −100…170 ms on a chat's first message | Same idempotency: a session id generated in this request cannot hold a prior message. Needs a libfx API signal (e.g. `fresh`) and libfx owner review | Proposed (libfx) |
+| libfx: combine the serial admission writes | Sending −50…150 ms | Only if the message record stays atomic and precedes the backstop | Investigate (libfx) |
+| fx0: drop the explicit `messageId` | Faster admission path | **Rejected:** a retried send could duplicate the message | Rejected |

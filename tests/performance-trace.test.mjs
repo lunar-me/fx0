@@ -83,6 +83,7 @@ const NETWORK_SCENARIO = `
       networkCategory('https://api.vercel.com', '/v2/teams'), networkCategory('https://oidc.vercel.com', '/'),
       networkCategory('https://us1-x.upstash.io', '/get'), networkCategory('https://ep-x.us-east-1.aws.neon.tech', '/sql'),
       networkCategory('https://ai-gateway.vercel.sh', '/v1'), networkCategory('not a url', '/'),
+      networkCategory('https://vercel-workflow.com', '/runs'), networkCategory('https://notvercel-workflow.com', '/'),
     ],
   }));
 `
@@ -101,7 +102,7 @@ test('network spans record only a category, status and timing for every undici r
     assert.ok(event.dur >= 0)
   }
   assert.doesNotMatch(JSON.stringify(local.snapshot), /secret-token|private\/path|api\.vercel\.com|127\.0\.0\.1|workflow\/runs/)
-  assert.deepEqual(local.categories, ['net.vercel_api', 'net.oidc', 'net.redis', 'net.neon', 'net.gateway', 'net.other'])
+  assert.deepEqual(local.categories, ['net.vercel_api', 'net.oidc', 'net.redis', 'net.neon', 'net.gateway', 'net.other', 'net.workflow', 'net.other'])
   const production = run({ ...hostEnv, VERCEL: '1', VERCEL_ENV: 'production', FX0_TRACE: '1', FX0_TRACE_PREVIEW: '1' })
   assert.deepEqual(production.snapshot.traceEvents, [], 'production never observes the network')
 })
