@@ -13,6 +13,10 @@ import { DEFAULT_MODEL, log } from '../../../lib/session'
 import { validatePromptImages, validatePromptPreviews } from '../../../lib/prompt-images'
 import { DesignAssetLimitError, retryDesignAssetCleanup, startDesignAssets, type PendingDesignAssets } from '../../../lib/design-assets'
 import { PROMPT_TEXT_LIMIT_ERROR, PROMPT_TEXT_MAX_BYTES, promptTextBytes } from '../../../lib/prompt-limits'
+import { markProcess } from '../../../lib/trace-server'
+
+// Measurement only (no-op unless tracing is enabled): when this module was evaluated.
+markProcess('loaded')
 
 export const maxDuration = 800
 

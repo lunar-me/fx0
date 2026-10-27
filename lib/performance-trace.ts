@@ -17,7 +17,7 @@ export type TraceName =
 export interface TraceContext { traceId?: string; sessionId?: string; turnId?: number }
 export type TraceNumbers = Partial<Record<
   'count' | 'chars' | 'bytes' | 'status' | 'failed' | 'cancelled' | 'first' |
-  'seq' | 'revision' | 'fromPost' | 'duplicate' | 'step' | 'incomplete' | 'uptime', number | boolean>>
+  'seq' | 'revision' | 'fromPost' | 'duplicate' | 'step' | 'incomplete' | 'uptime' | 'registered' | 'loaded', number | boolean>>
 
 const names = new Set<TraceName>([
   'request.handle', 'request.auth', 'request.revocation', 'request.owner', 'prompt.activate',
@@ -33,7 +33,7 @@ const names = new Set<TraceName>([
   'prompt.first_content', 'prompt.first_draft', 'prompt.finished',
 ])
 const fields = ['count', 'chars', 'bytes', 'status', 'failed', 'cancelled', 'first',
-  'seq', 'revision', 'fromPost', 'duplicate', 'step', 'incomplete', 'uptime'] as const
+  'seq', 'revision', 'fromPost', 'duplicate', 'step', 'incomplete', 'uptime', 'registered', 'loaded'] as const
 const noop = (_attrs?: TraceNumbers) => {}
 
 export function validTraceId(value: unknown): value is string {

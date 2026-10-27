@@ -85,7 +85,7 @@ const names = new Set([
   'prompt.turn', 'prompt.e2e',
 ])
 const numbers = ['count', 'chars', 'bytes', 'status', 'failed', 'cancelled', 'incomplete',
-  'first', 'seq', 'revision', 'fromPost', 'duplicate', 'step', 'uptime']
+  'first', 'seq', 'revision', 'fromPost', 'duplicate', 'step', 'uptime', 'registered', 'loaded']
 
 // The app recorder already redacts content. Keep a second, bounded output boundary:
 // never persist arbitrary CDP values, DOM text, URLs, headers, console logs or cookies.

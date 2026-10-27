@@ -14,7 +14,7 @@ const TRACE_MODULE = new URL('../lib/trace-server.ts', import.meta.url).href
 const SESSION = '00000000-0000-4000-8000-000000000001'
 const TRACE_ID = 'b'.repeat(32)
 const PREVIEW = { VERCEL: '1', VERCEL_ENV: 'preview', FX0_TRACE_PREVIEW: '1' }
-const ALLOWED_ARGS = ['traceId', 'sessionId', 'turnId', 'count', 'chars', 'bytes', 'status', 'failed', 'cancelled', 'first', 'seq', 'revision', 'fromPost', 'duplicate', 'step', 'incomplete', 'uptime']
+const ALLOWED_ARGS = ['traceId', 'sessionId', 'turnId', 'count', 'chars', 'bytes', 'status', 'failed', 'cancelled', 'first', 'seq', 'revision', 'fromPost', 'duplicate', 'step', 'incomplete', 'uptime', 'registered', 'loaded']
 const ALLOWED_EVENT_KEYS = ['name', 'cat', 'ph', 's', 'ts', 'dur', 'pid', 'tid', 'args']
 
 // One traced request, run in a fresh process the way one Vercel function instance would run it.
@@ -109,7 +109,10 @@ test('network spans record only a category, status and timing for every undici r
 
 test('request spans mark the process\'s first request and its uptime', () => {
   const source = `
-    import { runRequestTrace, serverTraceSnapshot } from ${JSON.stringify(TRACE_MODULE)};
+    import { runRequestTrace, serverTraceSnapshot, markProcess } from ${JSON.stringify(TRACE_MODULE)};
+    markProcess('registered');
+    await new Promise(resolve => setTimeout(resolve, 20));
+    markProcess('registered');
     for (let i = 0; i < 2; i++) await runRequestTrace(new Request('http://localhost/api/prompt'), async () => {});
     process.stdout.write(JSON.stringify(serverTraceSnapshot().traceEvents.filter(event => event.name === 'request.handle').map(event => event.args)));
   `
@@ -118,6 +121,10 @@ test('request spans mark the process\'s first request and its uptime', () => {
   assert.deepEqual(handles.map(args => args.first), [true, false])
   for (const args of handles) assert.ok(Number.isInteger(args.uptime) && args.uptime > 0 && args.uptime < 60_000)
   assert.ok(handles[1].uptime >= handles[0].uptime)
+  assert.ok(Number.isInteger(handles[0].registered) && handles[0].registered <= handles[0].uptime, 'the first mark is kept')
+  assert.equal(handles[1].registered, handles[0].registered)
+  assert.ok(handles[0].uptime - handles[0].registered >= 15, 'a later mark does not overwrite the first')
+  assert.equal(handles[0].loaded, undefined)
 })
 
 test('disabled tracing reads no clock and stores no events', () => {

@@ -29,6 +29,15 @@ interface TraceState {
   flushing?: Promise<void>
   warned?: boolean
   served?: boolean
+  marks: { registered?: number; loaded?: number }
+}
+
+// Process lifecycle marks, in ms of process uptime: when Next ran instrumentation's
+// register() and when the prompt route's module was evaluated. Numbers only; they
+// travel on request spans so a cold first request shows what was already loaded.
+export function markProcess(kind: 'registered' | 'loaded'): void {
+  const current = state()
+  if (current) current.marks[kind] ??= Math.round(process.uptime() * 1000)
 }
 const globalTrace = globalThis as typeof globalThis & { __fx0PerformanceTrace?: TraceState }
 const noop = (_attrs?: TraceNumbers) => {}
@@ -41,7 +50,7 @@ function state(): TraceState | undefined {
     const lane = mode === 'preview' ? `server:${randomUUID()}` : `server:${process.pid}`
     globalTrace.__fx0PerformanceTrace = {
       recorder: createTraceRecorder({ enabled: true, process: lane, capacity: 10_000 }),
-      context: new AsyncLocalStorage<TraceContext>(), turns: new Map(),
+      context: new AsyncLocalStorage<TraceContext>(), turns: new Map(), marks: {},
     }
     // Local batches flush on a timer, best-effort, off the prompt's acknowledgement path. A
     // preview has no timer: a Vercel function can freeze right after its response.
@@ -156,7 +165,7 @@ export function runRequestTrace<T>(request: Request, work: () => Promise<T>): Pr
   const traceId = validTraceId(incoming) ? incoming : randomUUID().replaceAll('-', '')
   // How long this process had lived when the request began, and whether it is the first
   // traced request it serves: a small uptime on a first request marks a cold instance.
-  const processAttrs = { uptime: Math.round(process.uptime() * 1000), first: !current.served }
+  const processAttrs = { uptime: Math.round(process.uptime() * 1000), first: !current.served, ...current.marks }
   current.served = true
   return current.context.run({ traceId }, () => traceAsync('request.handle', undefined, work, processAttrs))
 }
