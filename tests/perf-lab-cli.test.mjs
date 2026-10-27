@@ -82,6 +82,7 @@ test('think time becomes part of a workload id the run validator accepts', async
   assert.equal(workloadFor({ 'follow-up-gap-ms': '0' }, 'Reply exactly OK. Do not use tools.'), 'reply-ok-gap0ms')
   assert.equal(workloadFor({ 'think-ms': '3000', 'follow-up-gap-ms': '300000' }, 'Reply exactly OK. Do not use tools.'), 'reply-ok-think3000ms-gap300000ms')
   assert.throws(() => workloadFor({ 'follow-up-gap-ms': 'soon' }, 'x'))
+  assert.equal(workloadFor({ 'settle-ms': '5000' }, 'Reply exactly OK. Do not use tools.'), 'reply-ok-settle5000ms')
   const metadata = {
     environment: 'vercel-preview', durability: 'vercel', condition: 'cold', workloadHash: null, model: 'unknown',
     reasoningEffort: 'unknown', fast: null, accountHash: null, teamHash: null, viewport: null, revision: null,

@@ -218,6 +218,36 @@ The report tool refused deltas (`condition_unknown`) because `run` was not told 
 
 **Decision.** Ship it. The change gives `/api/warm` the prompt's `maxDuration`, loads the durable backend during the warm-up, and adds the grouping test. It is configuration plus one side-effect-free call, auth is unchanged, and it removes ~1 s from a cold first prompt when the person pauses about 3 s or more before sending. A paste-and-Enter in under a second gets only part of the benefit.
 
+## Phase 0: instance lifetime, follow-ups, page-load guard rails
+
+**Instance lifetime probe** (tracing preview, lab `~/.fx0-perf-labs/idle-probe`; each gap is from the previous prompt):
+
+| Gap | Sending | Process |
+| --- | ---: | --- |
+| Fresh deploy | 3423 ms | New; started 7.7 min earlier but uninitialized (`register()` ran with the request) |
+| 1 min | 973 ms | Same process, warm |
+| 2 min | **2434 ms** | **A different process**, started 103 s earlier, uninitialized |
+| 5 min | 848 ms | Warm |
+| 10 min | not run | Stopped to move faster |
+
+Vercel keeps started-but-uninitialized Node processes, and routes prompts to them even while a warm one exists. Cold initialization depends on routing, not only on idle time.
+
+**Follow-ups.** `perf:lab --follow-up-gap-ms N` sends a setup prompt, keeps the page open for N ms, then measures a second prompt in the same chat. The gap is part of the workload id. Baseline, gap 5 s, 4 samples (lab `~/.fx0-perf-labs/followup-baseline`):
+
+- Warm follow-ups are faster than a new chat: Sending 560–727 ms, admission 303–411 ms. Admission is 4 serial calls instead of 6: reads find data, and there is no run creation or seed checkpoint.
+- 1 of 4 landed on another process that had not loaded the prompt route or created the libfx agent: Sending 1551 ms. That was 5 s after the previous turn finished.
+- The per-chat typing warm-up is throttled to once a minute per chat, so a follow-up typed soon after the first message does not warm again. Candidate: warm when a turn finishes.
+
+**Page-load guard rails.** Every run now records FCP, LCP, DOMContentLoaded, load and composer ready from the browser's Performance APIs, as bounded numbers. Baseline follow-up runs: FCP 244–1268 ms, composer ready 589–1548 ms.
+
+**Method note.** The dedicated profile lost its session on the tracing host once; the lab refused to send ("not signed in") and nothing was sent. The first `login` on a brand-new branch host has failed twice and succeeded on the immediate retry.
+
+## Experiment 4: warm the instance when the app opens
+
+**Change** (branch `esteban/fx0-perf-warm-open`, commit `248a948`, on top of Experiment 3): `POST /api/warm` without a chat warms only the instance (libfx agent and durable backend) for a signed-in, same-origin caller, and reads or writes no chat. The client fires it in the background once the app is idle after first paint, on New chat, and when the tab returns, at most once a minute. A security test covers no session (401, no warm-up), cross-origin (refused), signed-in (204, no query, no chat touched) and a foreign chat id (refused).
+
+**Result A: instant send** (Experiment 3 vs 4, fresh deploys, `--think-ms 0`, 4 pairs, lab `exp4-open-cold`). The candidate is worse: Sending +252 ms paired, first text +900 ms. In 3 of 4 pairs the candidate prompt was the first request of a brand-new process (uptime ~650 ms, a full Node boot). Deployment logs for pair 1 show the open warm-up 560 ms before the prompt, and the chat warm-up arriving together with the prompt. Hypothesis: a warm-up still running when the prompt arrives makes Vercel start another instance, and the prompt lands on it. The lab's instant send (0.5 s after the page is ready) is also unrealistic for this feature. The realistic case is measured next with `--settle-ms`.
+
 ## Candidate ideas
 
 | Idea | Expected effect | Security assessment | Status |

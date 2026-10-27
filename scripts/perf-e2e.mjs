@@ -360,6 +360,9 @@ export async function run(options) {
     }
     // A follow-up run sends a setup prompt first (not measured), keeps the page open for
     // followUpGapMs, then measures a second prompt in the same chat.
+    // Optional pause after the app is ready and before typing, as a person looks at the
+    // page before writing; anything the app does on open runs during it.
+    if (options.settleMs) await delay(options.settleMs, undefined, { signal })
     const turns = options.followUpGapMs == null ? 1 : 2
     for (let turn = 1; turn <= turns; turn++) {
       if (turn === 2) {

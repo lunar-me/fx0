@@ -21,13 +21,13 @@ const help = `Usage: node scripts/perf-lab.mjs <command> [options]
             Create a dedicated fx0 performance profile and sign in once in its own Chrome window.
   run       --profile DIR --url URL --out LAB [--label baseline|candidate] [--pair ID]
             [--source DIR] [--prompt TEXT] [--workload ID] [--condition cold|warm]
-            [--think-ms N] [--follow-up-gap-ms N (measure a second prompt sent N ms after the first finished)]
+            [--settle-ms N (wait after the app is ready, before typing)] [--think-ms N] [--follow-up-gap-ms N (measure a second prompt sent N ms after the first finished)]
             [--environment local-development|local-production] [--durability local-file|vercel]
             One LIVE prompt in headless Chrome, saved as a run with its server trace.
   ab        --profile DIR --out LAB --pairs N --seed S
             --baseline-url URL --baseline-source DIR --candidate-url URL --candidate-source DIR
             [--warmup N (default 1 per side)] [--prompt TEXT] [--workload ID] [--environment ...] [--durability ...]
-            [--think-ms N] [--follow-up-gap-ms N]
+            [--settle-ms N] [--think-ms N] [--follow-up-gap-ms N]
             Balanced, seeded A/B: 2*N measured LIVE prompts plus warmups. Failures are kept, never retried.
   import    --browser FILE --server FILE|DIR --out LAB [--label L] [--pair ID] [--workload ID]
             [--condition ...] [--environment ...] [--durability ...]
@@ -115,8 +115,13 @@ function followUpGapMs(options) {
 // Driver options shared by measured runs and warm-ups. The deadline covers the gap.
 function driverOptions(options, url, prompt) {
   const gap = followUpGapMs(options)
-  return { url, prompt, timeoutMs: 180000 + (gap ?? 0), headless: true, profileDirectory: options.profile,
-    thinkMs: thinkMs(options), followUpGapMs: gap }
+  return { url, prompt, timeoutMs: 180000 + (gap ?? 0) + settleMs(options), headless: true, profileDirectory: options.profile,
+    thinkMs: thinkMs(options), followUpGapMs: gap, settleMs: settleMs(options) }
+}
+
+// Pause between the app being ready and typing.
+function settleMs(options) {
+  return integer(options['settle-ms'] ?? '0', 'settle-ms', 0, 600000)
 }
 
 // Think time and the follow-up gap are part of the workload, so runs with different
@@ -125,7 +130,8 @@ export function workloadFor(options, prompt) {
   const base = options.workload ?? (prompt === DEFAULT_PROMPT ? 'reply-ok' : 'custom')
   const pause = thinkMs(options)
   const gap = followUpGapMs(options)
-  return `${base}${pause ? `-think${pause}ms` : ''}${gap == null ? '' : `-gap${gap}ms`}`
+  const settle = settleMs(options)
+  return `${base}${settle ? `-settle${settle}ms` : ''}${pause ? `-think${pause}ms` : ''}${gap == null ? '' : `-gap${gap}ms`}`
 }
 
 function metadataFor(options, { context = {}, identity: who = {}, source = {}, prompt, capture, kind = 'local' }) {
