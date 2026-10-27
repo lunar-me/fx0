@@ -72,6 +72,23 @@ test('report compares both labels and refuses deltas when settings are unknown',
   assert.deepEqual(comparison.metrics, [])
 })
 
+test('think time becomes part of a workload id the run validator accepts', async () => {
+  const { workloadFor } = await import('../scripts/perf-lab.mjs')
+  const { createRun } = await import('../scripts/lib/perf-lab-data.mjs')
+  assert.equal(workloadFor({}, 'Reply exactly OK. Do not use tools.'), 'reply-ok')
+  assert.equal(workloadFor({ 'think-ms': '3000' }, 'Reply exactly OK. Do not use tools.'), 'reply-ok-think3000ms')
+  assert.equal(workloadFor({ 'think-ms': '3000', workload: 'bookshop' }, 'x'), 'bookshop-think3000ms')
+  assert.throws(() => workloadFor({ 'think-ms': '-1' }, 'x'))
+  const metadata = {
+    environment: 'vercel-preview', durability: 'vercel', condition: 'cold', workloadHash: null, model: 'unknown',
+    reasoningEffort: 'unknown', fast: null, accountHash: null, teamHash: null, viewport: null, revision: null,
+    sourceHash: null, instrumentation: 'fx0-trace-v1', history: 'new-chat', capture: 'headless', startBoundary: 'handler',
+  }
+  const run = workload => createRun({ browser, server, metadata: { ...metadata, workload }, label: 'baseline', recordedAt: '2026-10-27T00:00:00.000Z' })
+  for (const workload of ['reply-ok', 'reply-ok-think3000ms']) assert.equal(run(workload).metadata.workload, workload)
+  assert.throws(() => run('reply-ok@think3000ms'), /workload/, 'the validator rejects the old suffix')
+})
+
 test('a lab inside .next is refused before anything is written, since next build deletes it', async t => {
   const directory = await lab(t)
   const out = path.join(directory, '.next', 'fx0-lab', 'x')

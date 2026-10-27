@@ -105,14 +105,20 @@ function thinkMs(options) {
   return integer(options['think-ms'] ?? '0', 'think-ms', 0, 30000)
 }
 
+// Think time is part of the workload, so runs with different pauses never compare.
+export function workloadFor(options, prompt) {
+  const base = options.workload ?? (prompt === DEFAULT_PROMPT ? 'reply-ok' : 'custom')
+  const pause = thinkMs(options)
+  return pause ? `${base}-think${pause}ms` : base
+}
+
 function metadataFor(options, { context = {}, identity: who = {}, source = {}, prompt, capture, kind = 'local' }) {
   const known = value => (typeof value === 'string' && value ? value.toLowerCase() : 'unknown')
   return {
     environment: options.environment ?? (kind === 'preview' ? 'vercel-preview' : 'local-development'),
     durability: options.durability ?? (kind === 'preview' ? 'vercel' : 'local-file'),
     condition: options.condition ?? 'unknown',
-    // Think time is part of the workload: runs with different pauses never compare.
-    workload: (options.workload ?? (prompt === DEFAULT_PROMPT ? 'reply-ok' : 'custom')) + (thinkMs(options) ? `@think${thinkMs(options)}ms` : ''),
+    workload: workloadFor(options, prompt),
     workloadHash: prompt ? sha256(prompt) : null,
     model: known(context.model),
     reasoningEffort: known(context.reasoningEffort),
