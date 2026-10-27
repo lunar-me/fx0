@@ -118,6 +118,44 @@ Reading `libfx` 0.0.14 `durable.js` (`startTurn` / `send`) explains this. fx0 pa
 
 Host `vercel-workflow.com` was initially classified `net.other`. It is now `net.workflow`.
 
+## Experiment 2: overlap libfx's viewer-start read with send()
+
+**Hypothesis.** On a prompt with an explicit `messageId`, libfx 0.0.14 awaits `log.ui.length()` (the viewer's start, World `streams.getInfo`) before `send()` begins. The invariant only needs that read to land before the message is written to the log, and before the log read that answers the retry. Starting it alongside `send()`'s own session read removes one serial World round trip: expected −40…110 ms on Sending and on first text.
+
+**Where the code lives.** libfx is `vercel-labs/fx` `sdk/durable.js`. Current `main` has the same structure (`startTurn` / `send`), so a positive result becomes a libfx PR there, with the TLA+ models in `tests/tla/sdk/` updated and checked. fx0 then needs a libfx release.
+
+**What else in admission was checked and left alone.**
+
+- The run creation (`ensureRun`) and the two appends (seed checkpoint, then input) use optimistic concurrency on `eventCount`, one at a time. Combining them needs a batch API in World.
+- The Queues backstop must exist before acknowledging, so an accepted message survives the function dying.
+- The duplicate log read already runs in parallel, so removing it saves nothing.
+
+**Method.** Branch `esteban/fx0-perf-libfx-viewer-start` (commit `c6a9957`, never merged) patches the installed libfx at install time with `scripts/patch-libfx-experiment.mjs`. The script checks the exact version and that each fragment matches exactly once, so it fails the build rather than patching partially. Vercel's build log shows it applied. `FX0_TRACE_PREVIEW=1` is scoped to that branch. A/B: 10 balanced pairs against the tracing preview (`2d31e59`), plus one warm-up each, lab `exp2-viewer-start`.
+
+**Security and correctness review.** Nothing about auth, credentials, tenancy or the queue changes. Tests on the real installed libfx with an instrumented local World (`tests/libfx-viewer-start-experiment.test.mjs`) prove:
+
+- No log write happens before the viewer start lands.
+- `send()`'s read now overlaps it: this check fails on unpatched libfx and passes on the patched one.
+- A failed stream lookup (libfx counts it as an empty stream) still runs the turn once and shows the whole turn.
+- A retry of the same `messageId` answers from the log without running the model again.
+
+The 4 existing real-libfx tests also pass, along with core 170, auth 261, trace 59, typecheck and build.
+
+**Result.** 10 valid pairs, 0 failures (lab `exp2-viewer-start`).
+
+| Metric | Baseline p50 | Candidate p50 | Paired delta p50 |
+| --- | ---: | ---: | ---: |
+| Admission start → first write (the patched step) | 158 ms | 118 ms | **−44 ms** (7 of 10 pairs faster) |
+| `prompt.accepted` | 526 ms | 509 ms | −99 ms (noisy: +213, +333, +120 in some pairs) |
+| Sending | 832 ms | 884 ms | +1 ms |
+| First text | 2063 ms | 2174 ms | +195 ms (inside preview noise, ~±300 ms) |
+
+The network spans confirm the mechanism in production: on the candidate, the viewer-start read and `send()`'s read start together, and the first write follows the viewer start. When `streams.getInfo` itself is slow (242 ms once), the write still waits for it, by design.
+
+**Decision.** The change works and is safe, but saves one round trip (~45 ms, ~5 % of Sending). That is below the per-prompt spread, so 10 pairs cannot show it end to end; ~40+ pairs would be needed. It is a reasonable small libfx PR (it helps every libfx app on Vercel), but not the big win. The experiment branch stays unmerged.
+
+**Finding from the same data: cold starts.** 3 of 20 prompts (both sides: baseline 3 and 5, candidate 3 and 4) had 2.1–3.0 s Sending. The extra time sat before the handler started (+0.7…1.3 s outside it) and in `prompt.bind` (+470 ms, libfx agent creation). If ~15 % of prompts pay +1.5–2 s, that dwarfs any 45 ms admission tweak. Next: confirm they are cold function instances (new trace lanes) and measure what instance startup and the first `createFxAgent` cost.
+
 ## Candidate ideas
 
 | Idea | Expected effect | Security assessment | Status |
@@ -133,6 +171,8 @@ Host `vercel-workflow.com` was initially classified `net.other`. It is now `net.
 | Run revocation and ownership reads together, act only after both pass | −1 round trip on every chat route | Reads only; nothing is written or returned before both checks pass | Proposed |
 | Measure on a Vercel preview with `FX0_TRACE_PREVIEW=1` | Real production anatomy | Tracing stays off in production by code | Done |
 | Decompose libfx admission (549 ms) with network spans | Found 6 serial calls | Measurement only | Done |
-| libfx: skip the pre-reads for a session created in the same request | Sending −100…170 ms on a chat's first message | Same idempotency: a session id generated in this request cannot hold a prior message. Needs a libfx API signal (e.g. `fresh`) and libfx owner review | Proposed (libfx) |
+| libfx: skip the pre-reads for a session created in the same request | Sending −100…170 ms on a chat's first message | **Rejected:** two requests can race on a new chat's binding, so "created here" does not prove the log is empty | Rejected |
+| libfx: overlap the viewer-start read with `send()` (Experiment 2) | −44 ms to first write | Same invariants, proven on the real SDK | Works; below end-to-end noise. Small libfx PR candidate |
+| Cold starts: 3 of 20 prompts at 2–3 s Sending | Up to −1.5…2 s for those prompts | Measure first | **Next** |
 | libfx: combine the serial admission writes | Sending −50…150 ms | Only if the message record stays atomic and precedes the backstop | Investigate (libfx) |
 | fx0: drop the explicit `messageId` | Faster admission path | **Rejected:** a retried send could duplicate the message | Rejected |
